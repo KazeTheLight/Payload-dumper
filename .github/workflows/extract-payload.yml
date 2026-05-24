@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       ota_url:
-        description: "URL OTA/Firmware ZIP (Gofile, Pixeldrain, atau direct link)"
+        description: "URL OTA/Firmware ZIP (Gofile, Pixeldrain, MediaFire, GDrive, OneDrive, SourceForge, AFH, atau direct link)"
         required: true
         type: string
       partitions:
@@ -42,14 +42,28 @@ jobs:
           OTA_URL="${{ github.event.inputs.ota_url }}"
           echo "Source URL: $OTA_URL"
 
+          # ── Helper: ambil nama file dari path URL ───────────────────────────
+          get_name_from_url() {
+            basename "$(echo "$1" | cut -d'?' -f1)"
+          }
+
+          # ── Helper: ambil nama dari Content-Disposition ─────────────────────
+          get_name_from_headers() {
+            curl -sI -L "$1" \
+              | grep -i "content-disposition" \
+              | grep -oP 'filename=\K[^\r\n;]+' \
+              | tr -d '"' | head -1 | tr -d '\r'
+          }
+
+          # ════════════════════════════════════════════════════════════════════
+          # Gofile
+          # ════════════════════════════════════════════════════════════════════
           if echo "$OTA_URL" | grep -q "gofile.io"; then
             echo "Detected: Gofile"
             FILE_ID=$(echo "$OTA_URL" | grep -oP '(?<=gofile\.io/d/)[^/?]+')
-            echo "Gofile ID: $FILE_ID"
 
             TOKEN=$(curl -s "https://api.gofile.io/accounts" -X POST \
               | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['data']['token'])")
-            echo "Token: $TOKEN"
 
             INFO=$(curl -s "https://api.gofile.io/contents/${FILE_ID}?wt=4fd6sg89d7s6&cache=true" \
               -H "Authorization: Bearer $TOKEN")
@@ -65,34 +79,161 @@ jobs:
             FIRST=$(grep "\.zip" gofile_files.txt | head -1 || head -1 gofile_files.txt)
             ZIP_NAME=$(echo "$FIRST" | cut -d'|' -f1)
             ZIP_LINK=$(echo "$FIRST" | cut -d'|' -f2)
-            echo "Downloading: $ZIP_NAME"
             curl -L "$ZIP_LINK" -H "Cookie: accountToken=$TOKEN" -o "$ZIP_NAME" --progress-bar
 
+          # ════════════════════════════════════════════════════════════════════
+          # Pixeldrain
+          # ════════════════════════════════════════════════════════════════════
           elif echo "$OTA_URL" | grep -q "pixeldrain.com"; then
             echo "Detected: Pixeldrain"
             FILE_ID=$(echo "$OTA_URL" | grep -oP '(?<=pixeldrain\.com/u/)[^/?]+')
-            echo "Pixeldrain ID: $FILE_ID"
 
             ZIP_NAME=$(curl -s "https://pixeldrain.com/api/file/${FILE_ID}/info" \
               | python3 -c "import sys,json; print(json.load(sys.stdin)['name'])")
-            echo "Filename: $ZIP_NAME"
 
             curl -L "https://pixeldrain.com/api/file/${FILE_ID}" -o "$ZIP_NAME" --progress-bar
 
+          # ════════════════════════════════════════════════════════════════════
+          # MediaFire
+          # ════════════════════════════════════════════════════════════════════
+          elif echo "$OTA_URL" | grep -q "mediafire.com"; then
+            echo "Detected: MediaFire"
+
+            # Scrape direct download link dari halaman MediaFire
+            DIRECT=$(curl -s "$OTA_URL" \
+              | grep -oP '(?<=href=")[^"]*mediafire\.com/file/[^"]*' \
+              | head -1)
+
+            if [ -z "$DIRECT" ]; then
+              # Coba format /file/ langsung
+              DIRECT=$(curl -sL "$OTA_URL" \
+                | grep -oP 'https://download[^"]+' \
+                | head -1)
+            fi
+
+            echo "Direct link: $DIRECT"
+            ZIP_NAME=$(get_name_from_url "$OTA_URL")
+            # Hapus trailing /file/ path
+            ZIP_NAME=$(echo "$ZIP_NAME" | sed 's|/file$||')
+            [ -z "$ZIP_NAME" ] && ZIP_NAME="firmware_$(date +%Y%m%d_%H%M%S).zip"
+
+            curl -L "$DIRECT" -o "$ZIP_NAME" --progress-bar
+
+          # ════════════════════════════════════════════════════════════════════
+          # Google Drive
+          # ════════════════════════════════════════════════════════════════════
+          elif echo "$OTA_URL" | grep -qE "drive.google.com|docs.google.com"; then
+            echo "Detected: Google Drive"
+
+            # Install gdown - lebih reliable untuk GDrive file besar
+            pip install gdown --quiet --break-system-packages
+
+            # Ekstrak file ID dari berbagai format URL GDrive
+            FILE_ID=$(echo "$OTA_URL" | grep -oP '(?<=/d/)[^/?]+')
+            if [ -z "$FILE_ID" ]; then
+              FILE_ID=$(echo "$OTA_URL" | grep -oP '(?<=id=)[^&]+')
+            fi
+            echo "GDrive ID: $FILE_ID"
+
+            # Download ke folder sementara untuk ambil nama file asli
+            mkdir -p gdrive_tmp
+            gdown --id "$FILE_ID" --output gdrive_tmp/ --fuzzy || {
+              echo "gdown gagal, coba dengan URL langsung..."
+              gdown "$OTA_URL" --output gdrive_tmp/ --fuzzy
+            }
+
+            # Ambil nama file hasil download
+            ZIP_NAME=$(ls gdrive_tmp/ | head -1)
+            if [ -z "$ZIP_NAME" ]; then
+              ZIP_NAME="gdrive_$(date +%Y%m%d_%H%M%S).zip"
+            fi
+            echo "Filename: $ZIP_NAME"
+            mv "gdrive_tmp/$ZIP_NAME" "./$ZIP_NAME"
+
+          # ════════════════════════════════════════════════════════════════════
+          # OneDrive
+          # ════════════════════════════════════════════════════════════════════
+          elif echo "$OTA_URL" | grep -qE "onedrive.live.com|1drv.ms|sharepoint.com"; then
+            echo "Detected: OneDrive"
+
+            # Konversi share link ke direct download
+            if echo "$OTA_URL" | grep -q "1drv.ms"; then
+              # Resolve short URL dulu
+              RESOLVED=$(curl -sI "$OTA_URL" | grep -i "location:" | awk '{print $2}' | tr -d '\r')
+              [ -z "$RESOLVED" ] && RESOLVED="$OTA_URL"
+            else
+              RESOLVED="$OTA_URL"
+            fi
+
+            # Encode URL dan konversi ke direct download
+            ENCODED=$(python3 -c "
+          import base64, sys
+          url = sys.argv[1]
+          b = base64.b64encode(url.encode()).decode()
+          b = b.rstrip('=').replace('+','-').replace('/','_')
+          print('https://api.onedrive.com/v1.0/shares/u!' + b + '/root/content')
+          " "$RESOLVED")
+
+            echo "Direct URL: $ENCODED"
+            ZIP_NAME=$(get_name_from_headers "$ENCODED")
+            [ -z "$ZIP_NAME" ] && ZIP_NAME="onedrive_$(date +%Y%m%d_%H%M%S).zip"
+
+            echo "Filename: $ZIP_NAME"
+            curl -L "$ENCODED" -o "$ZIP_NAME" --progress-bar
+
+          # ════════════════════════════════════════════════════════════════════
+          # SourceForge
+          # ════════════════════════════════════════════════════════════════════
+          elif echo "$OTA_URL" | grep -q "sourceforge.net"; then
+            echo "Detected: SourceForge"
+
+            # SourceForge redirect otomatis ke mirror, tinggal follow
+            ZIP_NAME=$(get_name_from_headers "$OTA_URL")
+            [ -z "$ZIP_NAME" ] && ZIP_NAME=$(get_name_from_url "$OTA_URL")
+            [ -z "$ZIP_NAME" ] && ZIP_NAME="sourceforge_$(date +%Y%m%d_%H%M%S).zip"
+
+            echo "Filename: $ZIP_NAME"
+            curl -L "$OTA_URL" -o "$ZIP_NAME" --progress-bar
+
+          # ════════════════════════════════════════════════════════════════════
+          # AndroidFileHost
+          # ════════════════════════════════════════════════════════════════════
+          elif echo "$OTA_URL" | grep -q "androidfilehost.com"; then
+            echo "Detected: AndroidFileHost"
+
+            # Ambil fid dari URL
+            FID=$(echo "$OTA_URL" | grep -oP '(?<=fid=)[^&]+')
+            echo "AFH FID: $FID"
+
+            # Scrape direct link
+            DIRECT=$(curl -sL \
+              -H "User-Agent: Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36" \
+              -H "Referer: https://androidfilehost.com" \
+              "$OTA_URL" \
+              | grep -oP '(?<=href=")[^"]*androidfilehost[^"]*download[^"]*' \
+              | head -1)
+
+            if [ -z "$DIRECT" ]; then
+              DIRECT="https://androidfilehost.com/?fid=${FID}&action=download"
+            fi
+
+            ZIP_NAME=$(get_name_from_url "$OTA_URL")
+            [ -z "$ZIP_NAME" ] && ZIP_NAME="afh_$(date +%Y%m%d_%H%M%S).zip"
+
+            echo "Filename: $ZIP_NAME"
+            curl -L "$DIRECT" \
+              -H "User-Agent: Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36" \
+              -H "Referer: https://androidfilehost.com" \
+              -o "$ZIP_NAME" --progress-bar
+
+          # ════════════════════════════════════════════════════════════════════
+          # Direct URL (fallback)
+          # ════════════════════════════════════════════════════════════════════
           else
             echo "Detected: Direct URL"
-            ZIP_NAME=$(curl -sI -L "$OTA_URL" \
-              | grep -i "content-disposition" \
-              | grep -oP 'filename=\K[^\r\n;]+' \
-              | tr -d '"' | head -1 | tr -d '\r')
-
-            if [ -z "$ZIP_NAME" ]; then
-              ZIP_NAME=$(basename "$(echo "$OTA_URL" | cut -d'?' -f1)")
-            fi
-
-            if [ -z "$ZIP_NAME" ]; then
-              ZIP_NAME="firmware_$(date +%Y%m%d_%H%M%S).zip"
-            fi
+            ZIP_NAME=$(get_name_from_headers "$OTA_URL")
+            [ -z "$ZIP_NAME" ] && ZIP_NAME=$(get_name_from_url "$OTA_URL")
+            [ -z "$ZIP_NAME" ] && ZIP_NAME="firmware_$(date +%Y%m%d_%H%M%S).zip"
 
             echo "Filename: $ZIP_NAME"
             curl -L "$OTA_URL" -o "$ZIP_NAME" --progress-bar
