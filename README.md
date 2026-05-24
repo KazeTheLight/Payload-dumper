@@ -1,14 +1,16 @@
-# 📦 Payload Dumper CI
+# 📦 Payload Dumper & Firmware Dumper CI
 
-Ekstrak partisi dari `payload.bin` OTA Android secara otomatis via GitHub Actions, tanpa perlu install apapun di PC.
+Ekstrak partisi dari firmware Android secara otomatis via GitHub Actions, tanpa perlu install apapun di PC.
 
+Mendukung format **OTA ZIP** (dengan `payload.bin`) maupun **Fastboot ROM** (`.img` langsung).
 Didukung oleh [payload-dumper-go](https://github.com/ssut/payload-dumper-go).
 
 ---
 
 ## ✨ Fitur
 
-- ✅ Download OTA dari **Gofile**, **Pixeldrain**, atau URL langsung
+- ✅ Auto-deteksi format ZIP (OTA payload vs Fastboot ROM)
+- ✅ Download dari berbagai platform hosting
 - ✅ Nama file sesuai file asli yang didownload
 - ✅ Ekstrak semua partisi atau partisi tertentu saja
 - ✅ Hasil tersimpan sebagai **GitHub Actions Artifact**
@@ -16,31 +18,48 @@ Didukung oleh [payload-dumper-go](https://github.com/ssut/payload-dumper-go).
 
 ---
 
-## 🚀 Cara Pakai
-
-1. Buka tab **Actions**
-2. Pilih workflow **Extract payload.bin**
-3. Klik **Run workflow**
-4. Isi form:
-
-| Input | Keterangan | Contoh |
-|-------|-----------|--------|
-| `ota_url` | Link download OTA ZIP | `https://gofile.io/d/XXXXXX` |
-| `partitions` | Partisi yang diekstrak (kosong = semua) | `boot,vendor_boot,init_boot` |
-| `release_tag` | Tag release untuk upload (opsional) | `poco-f6-miui-dump` |
-
-5. Tunggu workflow selesai (~5–15 menit tergantung ukuran OTA)
-6. Download hasil di section **Artifacts** (tersimpan 7 hari)
-
----
-
-## 🌐 Sumber yang Didukung
+## 🌐 Platform yang Didukung
 
 | Platform | Format URL |
 |----------|-----------|
 | Gofile | `https://gofile.io/d/XXXXXX` |
 | Pixeldrain | `https://pixeldrain.com/u/XXXXXXXX` |
-| Direct link | URL apapun yang langsung download file |
+| MediaFire | `https://www.mediafire.com/file/...` |
+| Google Drive | `https://drive.google.com/file/d/...` |
+| OneDrive | `https://1drv.ms/...` atau `https://onedrive.live.com/...` |
+| SourceForge | `https://sourceforge.net/projects/.../files/...` |
+| AndroidFileHost | `https://androidfilehost.com/?fid=...` |
+| Direct Link | URL apapun yang langsung download file |
+
+---
+
+## 🚀 Cara Pakai
+
+1. Buka tab **Actions**
+2. Pilih workflow **Extract Firmware**
+3. Klik **Run workflow**
+4. Isi form:
+
+| Input | Keterangan | Contoh |
+|-------|-----------|--------|
+| `ota_url` | Link download firmware/OTA | `https://gofile.io/d/XXXXXX` |
+| `partitions` | Partisi yang diekstrak (kosong = semua) | `boot,vendor_boot,init_boot` |
+| `release_tag` | Tag release untuk upload (opsional) | `poco-f6-a15-dump` |
+
+5. Tunggu workflow selesai (~5–15 menit tergantung ukuran file)
+6. Download hasil di section **Artifacts** (tersimpan 7 hari)
+
+---
+
+## 🔍 Auto-Deteksi Format
+
+Workflow otomatis mendeteksi isi ZIP:
+
+| Kondisi | Mode | Aksi |
+|---------|------|------|
+| Ada `payload.bin` di dalam ZIP | OTA | Ekstrak → dump via payload-dumper-go |
+| Ada `.img` langsung di dalam ZIP | Fastboot ROM | Ekstrak `.img` langsung ke output |
+| Tidak ada keduanya | — | Error + tampilkan isi ZIP |
 
 ---
 
@@ -58,6 +77,8 @@ product.img
 odm.img
 ...
 ```
+
+Semua file juga dikompres menjadi `extracted_partitions.zip`.
 
 ---
 
@@ -80,9 +101,11 @@ File `.img` dan ZIP akan otomatis ter-attach ke release tersebut.
 
 ## ⚠️ Catatan
 
-- Ukuran OTA besar (>3GB) mungkin memerlukan waktu lebih lama
+- OTA berukuran besar (>3GB) memerlukan waktu lebih lama
 - Artifact otomatis terhapus setelah **7 hari**
 - GitHub Actions gratis tersedia **2.000 menit/bulan** untuk akun free
+- Google Drive: file yang dibatasi/private tidak bisa didownload
+- OneDrive: hanya mendukung link sharing publik
 
 ---
 
