@@ -1,4 +1,4 @@
-# 📦 Payload Dumper and Fastboot Dumper CI
+# 📦 Payload Dumper CI
 
 Ekstrak partisi dari `payload.bin` OTA Android secara otomatis via GitHub Actions, tanpa perlu install apapun di PC.
 
