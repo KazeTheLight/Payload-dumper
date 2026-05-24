@@ -125,8 +125,8 @@ jobs:
           elif echo "$OTA_URL" | grep -qE "drive.google.com|docs.google.com"; then
             echo "Detected: Google Drive"
 
-            # Install gdown - lebih reliable untuk GDrive file besar
-            pip install gdown --quiet --break-system-packages
+            # Install gdown versi terbaru
+            pip install --upgrade gdown --quiet --break-system-packages
 
             # Ekstrak file ID dari berbagai format URL GDrive
             FILE_ID=$(echo "$OTA_URL" | grep -oP '(?<=/d/)[^/?]+')
@@ -134,12 +134,13 @@ jobs:
               FILE_ID=$(echo "$OTA_URL" | grep -oP '(?<=id=)[^&]+')
             fi
             echo "GDrive ID: $FILE_ID"
+            GDRIVE_DIRECT="https://drive.google.com/uc?id=${FILE_ID}&export=download"
 
             # Download ke folder sementara untuk ambil nama file asli
             mkdir -p gdrive_tmp
-            gdown --id "$FILE_ID" --output gdrive_tmp/ --fuzzy || {
-              echo "gdown gagal, coba dengan URL langsung..."
-              gdown "$OTA_URL" --output gdrive_tmp/ --fuzzy
+            gdown "$GDRIVE_DIRECT" --output gdrive_tmp/ || {
+              echo "gdown gagal, coba dengan format URL alternatif..."
+              gdown "https://drive.google.com/open?id=${FILE_ID}" --output gdrive_tmp/
             }
 
             # Ambil nama file hasil download
