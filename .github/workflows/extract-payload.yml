@@ -41,16 +41,83 @@ jobs:
       # ── Download OTA ZIP ────────────────────────────────────────────────────
       - name: Download OTA ZIP
         run: |
-          echo "Downloading OTA from: ${{ github.event.inputs.ota_url }}"
-          curl -L "${{ github.event.inputs.ota_url }}" -o ota.zip --progress-bar
-          ls -lh ota.zip
+          OTA_URL="${{ github.event.inputs.ota_url }}"
+          echo "Source URL: $OTA_URL"
+
+          # ── Gofile ──────────────────────────────────────────────────────────
+          if echo "$OTA_URL" | grep -q "gofile.io"; then
+            echo "Detected: Gofile"
+            # Ambil file ID dari URL (format: gofile.io/d/XXXXXX)
+            FILE_ID=$(echo "$OTA_URL" | grep -oP '(?<=gofile\.io/d/)[^/?]+')
+            echo "Gofile ID: $FILE_ID"
+
+            # Ambil guest token
+            TOKEN=$(curl -s "https://api.gofile.io/accounts" -X POST \
+              | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['data']['token'])")
+            echo "Token: $TOKEN"
+
+            # Ambil info file
+            INFO=$(curl -s "https://api.gofile.io/contents/$FILE_ID?wt=4fd6sg89d7s6&cache=true" \
+              -H "Authorization: Bearer $TOKEN")
+            echo "$INFO" | python3 -c "import sys,json; d=json.load(sys.stdin); [print(f['name']+'|'+f['link']) for f in d['data']['children'].values() if f['type']=='file']" \
+              > gofile_files.txt
+            cat gofile_files.txt
+
+            # Download file pertama (atau yang .zip)
+            FIRST=$(grep "\.zip" gofile_files.txt | head -1 || head -1 gofile_files.txt)
+            ZIP_NAME=$(echo "$FIRST" | cut -d'|' -f1)
+            ZIP_LINK=$(echo "$FIRST" | cut -d'|' -f2)
+            echo "Downloading: $ZIP_NAME"
+            curl -L "$ZIP_LINK" -H "Cookie: accountToken=$TOKEN" -o "$ZIP_NAME" --progress-bar
+
+          # ── Pixeldrain ───────────────────────────────────────────────────────
+          elif echo "$OTA_URL" | grep -q "pixeldrain.com"; then
+            echo "Detected: Pixeldrain"
+            # Ambil file ID dari URL (format: pixeldrain.com/u/XXXXXXXX)
+            FILE_ID=$(echo "$OTA_URL" | grep -oP '(?<=pixeldrain\.com/u/)[^/?]+')
+            echo "Pixeldrain ID: $FILE_ID"
+
+            # Ambil nama file dari API
+            ZIP_NAME=$(curl -s "https://pixeldrain.com/api/file/$FILE_ID/info" \
+              | python3 -c "import sys,json; print(json.load(sys.stdin)['name'])")
+            echo "Filename: $ZIP_NAME"
+
+            # Download via direct API
+            curl -L "https://pixeldrain.com/api/file/$FILE_ID" -o "$ZIP_NAME" --progress-bar
+
+          # ── Direct URL (fallback) ─────────────────────────────────────────────
+          else
+            echo "Detected: Direct URL"
+            # Coba ambil nama dari Content-Disposition atau path URL
+            ZIP_NAME=$(curl -sI -L "$OTA_URL" \
+              | grep -i "content-disposition" \
+              | grep -oP 'filename[^;=\n]*=(['"'"'"]?)?\K[^;\n"'"'"']+' \
+              | head -1 | tr -d '\r')
+
+            if [ -z "$ZIP_NAME" ]; then
+              ZIP_NAME=$(basename "$(echo "$OTA_URL" | cut -d'?' -f1)")
+            fi
+
+            # Fallback kalau masih kosong
+            if [ -z "$ZIP_NAME" ] || [[ "$ZIP_NAME" != *.zip ]]; then
+              ZIP_NAME="ota_$(date +%Y%m%d_%H%M%S).zip"
+            fi
+
+            echo "Filename: $ZIP_NAME"
+            curl -L "$OTA_URL" -o "$ZIP_NAME" --progress-bar
+          fi
+
+          # Simpan nama file ke env untuk step berikutnya
+          echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
+          ls -lh "$ZIP_NAME"
 
       # ── Ekstrak payload.bin dari ZIP ────────────────────────────────────────
       - name: Extract payload.bin from ZIP
         run: |
-          unzip -o ota.zip payload.bin -d extracted/ || {
+          echo "Extracting from: $ZIP_NAME"
+          unzip -o "$ZIP_NAME" payload.bin -d extracted/ || {
             echo "payload.bin tidak ditemukan di root ZIP, coba cari di subdirektori..."
-            unzip -o ota.zip "*/payload.bin" -d extracted/
+            unzip -o "$ZIP_NAME" "*/payload.bin" -d extracted/
             find extracted/ -name "payload.bin" -exec mv {} extracted/payload.bin \;
           }
           ls -lh extracted/payload.bin
