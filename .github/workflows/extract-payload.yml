@@ -1,4 +1,4 @@
-name: Extract payload.bin and fastboot rom
+name: Extract payload.bin
 
 on:
   workflow_dispatch:
