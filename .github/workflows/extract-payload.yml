@@ -1,4 +1,4 @@
-name: Extract payload.bin
+name: Extract Payload & Firmware
 
 on:
   workflow_dispatch:
@@ -26,7 +26,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ── Download payload-dumper-go ──────────────────────────────────────────
       - name: Download payload-dumper-go
         run: |
           LATEST=$(curl -s https://api.github.com/repos/ssut/payload-dumper-go/releases/latest \
@@ -38,13 +37,11 @@ jobs:
           chmod +x payload-dumper-go
           ./payload-dumper-go --version || true
 
-      # ── Download ZIP ────────────────────────────────────────────────────────
       - name: Download ZIP
         run: |
           OTA_URL="${{ github.event.inputs.ota_url }}"
           echo "Source URL: $OTA_URL"
 
-          # ── Gofile ──────────────────────────────────────────────────────────
           if echo "$OTA_URL" | grep -q "gofile.io"; then
             echo "Detected: Gofile"
             FILE_ID=$(echo "$OTA_URL" | grep -oP '(?<=gofile\.io/d/)[^/?]+')
@@ -54,10 +51,15 @@ jobs:
               | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['data']['token'])")
             echo "Token: $TOKEN"
 
-            INFO=$(curl -s "https://api.gofile.io/contents/$FILE_ID?wt=4fd6sg89d7s6&cache=true" \
+            INFO=$(curl -s "https://api.gofile.io/contents/${FILE_ID}?wt=4fd6sg89d7s6&cache=true" \
               -H "Authorization: Bearer $TOKEN")
-            echo "$INFO" | python3 -c "import sys,json; d=json.load(sys.stdin); [print(f['name']+'|'+f['link']) for f in d['data']['children'].values() if f['type']=='file']" \
-              > gofile_files.txt
+            echo "$INFO" | python3 -c "
+          import sys, json
+          d = json.load(sys.stdin)
+          for f in d['data']['children'].values():
+              if f['type'] == 'file':
+                  print(f['name'] + '|' + f['link'])
+          " > gofile_files.txt
             cat gofile_files.txt
 
             FIRST=$(grep "\.zip" gofile_files.txt | head -1 || head -1 gofile_files.txt)
@@ -66,31 +68,29 @@ jobs:
             echo "Downloading: $ZIP_NAME"
             curl -L "$ZIP_LINK" -H "Cookie: accountToken=$TOKEN" -o "$ZIP_NAME" --progress-bar
 
-          # ── Pixeldrain ───────────────────────────────────────────────────────
           elif echo "$OTA_URL" | grep -q "pixeldrain.com"; then
             echo "Detected: Pixeldrain"
             FILE_ID=$(echo "$OTA_URL" | grep -oP '(?<=pixeldrain\.com/u/)[^/?]+')
             echo "Pixeldrain ID: $FILE_ID"
 
-            ZIP_NAME=$(curl -s "https://pixeldrain.com/api/file/$FILE_ID/info" \
+            ZIP_NAME=$(curl -s "https://pixeldrain.com/api/file/${FILE_ID}/info" \
               | python3 -c "import sys,json; print(json.load(sys.stdin)['name'])")
             echo "Filename: $ZIP_NAME"
 
-            curl -L "https://pixeldrain.com/api/file/$FILE_ID" -o "$ZIP_NAME" --progress-bar
+            curl -L "https://pixeldrain.com/api/file/${FILE_ID}" -o "$ZIP_NAME" --progress-bar
 
-          # ── Direct URL (fallback) ─────────────────────────────────────────────
           else
             echo "Detected: Direct URL"
             ZIP_NAME=$(curl -sI -L "$OTA_URL" \
               | grep -i "content-disposition" \
-              | grep -oP 'filename[^;=\n]*=(['"'"'"]?)?\K[^;\n"'"'"']+' \
-              | head -1 | tr -d '\r')
+              | grep -oP 'filename=\K[^\r\n;]+' \
+              | tr -d '"' | head -1 | tr -d '\r')
 
             if [ -z "$ZIP_NAME" ]; then
               ZIP_NAME=$(basename "$(echo "$OTA_URL" | cut -d'?' -f1)")
             fi
 
-            if [ -z "$ZIP_NAME" ] || [[ "$ZIP_NAME" != *.zip ]]; then
+            if [ -z "$ZIP_NAME" ]; then
               ZIP_NAME="firmware_$(date +%Y%m%d_%H%M%S).zip"
             fi
 
@@ -101,17 +101,14 @@ jobs:
           echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
           ls -lh "$ZIP_NAME"
 
-      # ── Deteksi tipe ZIP & ekstrak ─────────────────────────────────────────
       - name: Detect ZIP type and extract
         run: |
           mkdir -p extracted output
           echo "=== Isi ZIP ==="
           unzip -l "$ZIP_NAME" | head -60
 
-          # ── Cek ada payload.bin? ─────────────────────────────────────────────
           if unzip -l "$ZIP_NAME" | grep -q "payload\.bin"; then
-            echo ""
-            echo "MODE: OTA — payload.bin ditemukan, akan pakai payload-dumper-go"
+            echo "MODE: OTA - payload.bin ditemukan"
             echo "EXTRACT_MODE=payload" >> $GITHUB_ENV
 
             unzip -o "$ZIP_NAME" payload.bin -d extracted/ || {
@@ -120,10 +117,8 @@ jobs:
             }
             ls -lh extracted/payload.bin
 
-          # ── Cek ada .img langsung? (Fastboot ROM) ────────────────────────────
           elif unzip -l "$ZIP_NAME" | grep -q "\.img"; then
-            echo ""
-            echo "MODE: Fastboot ROM — .img ditemukan langsung"
+            echo "MODE: Fastboot ROM - .img ditemukan langsung"
             echo "EXTRACT_MODE=fastboot" >> $GITHUB_ENV
 
             PARTITIONS="${{ github.event.inputs.partitions }}"
@@ -132,7 +127,6 @@ jobs:
               echo "Mengekstrak SEMUA .img..."
               unzip -o "$ZIP_NAME" "*.img" -d output/ 2>/dev/null || true
               unzip -o "$ZIP_NAME" "*/*.img" -d output/ 2>/dev/null || true
-              # Flatten subfolder ke root output/
               find output/ -mindepth 2 -name "*.img" -exec mv {} output/ \;
             else
               echo "Mengekstrak partisi: $PARTITIONS"
@@ -156,7 +150,6 @@ jobs:
             exit 1
           fi
 
-      # ── Dump payload.bin (hanya jika mode OTA) ─────────────────────────────
       - name: Dump payload.bin
         if: env.EXTRACT_MODE == 'payload'
         run: |
@@ -174,7 +167,6 @@ jobs:
           echo "=== Hasil ekstraksi ==="
           ls -lh output/
 
-      # ── Compress output ─────────────────────────────────────────────────────
       - name: Compress output
         run: |
           cd output
@@ -182,7 +174,6 @@ jobs:
           cd ..
           ls -lh extracted_partitions.zip
 
-      # ── Upload sebagai GitHub Actions Artifact ──────────────────────────────
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -190,7 +181,6 @@ jobs:
           path: output/
           retention-days: 7
 
-      # ── Upload ke GitHub Release (opsional) ─────────────────────────────────
       - name: Upload to GitHub Release
         if: ${{ github.event.inputs.release_tag != '' }}
         uses: softprops/action-gh-release@v2
@@ -201,145 +191,6 @@ jobs:
             ## Extracted from Firmware
             **Source:** `${{ github.event.inputs.ota_url }}`
             **Mode:** `${{ env.EXTRACT_MODE }}`
-            **Partitions:** `${{ github.event.inputs.partitions || 'all' }}`
-          files: |
-            output/*.img
-            extracted_partitions.zip
-          token: ${{ secrets.GITHUB_TOKEN }}
-          tar -xzf payload-dumper-go.tar.gz
-          chmod +x payload-dumper-go
-          ./payload-dumper-go --version || true
-
-      # ── Download OTA ZIP ────────────────────────────────────────────────────
-      - name: Download OTA ZIP
-        run: |
-          OTA_URL="${{ github.event.inputs.ota_url }}"
-          echo "Source URL: $OTA_URL"
-
-          # ── Gofile ──────────────────────────────────────────────────────────
-          if echo "$OTA_URL" | grep -q "gofile.io"; then
-            echo "Detected: Gofile"
-            # Ambil file ID dari URL (format: gofile.io/d/XXXXXX)
-            FILE_ID=$(echo "$OTA_URL" | grep -oP '(?<=gofile\.io/d/)[^/?]+')
-            echo "Gofile ID: $FILE_ID"
-
-            # Ambil guest token
-            TOKEN=$(curl -s "https://api.gofile.io/accounts" -X POST \
-              | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['data']['token'])")
-            echo "Token: $TOKEN"
-
-            # Ambil info file
-            INFO=$(curl -s "https://api.gofile.io/contents/$FILE_ID?wt=4fd6sg89d7s6&cache=true" \
-              -H "Authorization: Bearer $TOKEN")
-            echo "$INFO" | python3 -c "import sys,json; d=json.load(sys.stdin); [print(f['name']+'|'+f['link']) for f in d['data']['children'].values() if f['type']=='file']" \
-              > gofile_files.txt
-            cat gofile_files.txt
-
-            # Download file pertama (atau yang .zip)
-            FIRST=$(grep "\.zip" gofile_files.txt | head -1 || head -1 gofile_files.txt)
-            ZIP_NAME=$(echo "$FIRST" | cut -d'|' -f1)
-            ZIP_LINK=$(echo "$FIRST" | cut -d'|' -f2)
-            echo "Downloading: $ZIP_NAME"
-            curl -L "$ZIP_LINK" -H "Cookie: accountToken=$TOKEN" -o "$ZIP_NAME" --progress-bar
-
-          # ── Pixeldrain ───────────────────────────────────────────────────────
-          elif echo "$OTA_URL" | grep -q "pixeldrain.com"; then
-            echo "Detected: Pixeldrain"
-            # Ambil file ID dari URL (format: pixeldrain.com/u/XXXXXXXX)
-            FILE_ID=$(echo "$OTA_URL" | grep -oP '(?<=pixeldrain\.com/u/)[^/?]+')
-            echo "Pixeldrain ID: $FILE_ID"
-
-            # Ambil nama file dari API
-            ZIP_NAME=$(curl -s "https://pixeldrain.com/api/file/$FILE_ID/info" \
-              | python3 -c "import sys,json; print(json.load(sys.stdin)['name'])")
-            echo "Filename: $ZIP_NAME"
-
-            # Download via direct API
-            curl -L "https://pixeldrain.com/api/file/$FILE_ID" -o "$ZIP_NAME" --progress-bar
-
-          # ── Direct URL (fallback) ─────────────────────────────────────────────
-          else
-            echo "Detected: Direct URL"
-            # Coba ambil nama dari Content-Disposition atau path URL
-            ZIP_NAME=$(curl -sI -L "$OTA_URL" \
-              | grep -i "content-disposition" \
-              | grep -oP 'filename[^;=\n]*=(['"'"'"]?)?\K[^;\n"'"'"']+' \
-              | head -1 | tr -d '\r')
-
-            if [ -z "$ZIP_NAME" ]; then
-              ZIP_NAME=$(basename "$(echo "$OTA_URL" | cut -d'?' -f1)")
-            fi
-
-            # Fallback kalau masih kosong
-            if [ -z "$ZIP_NAME" ] || [[ "$ZIP_NAME" != *.zip ]]; then
-              ZIP_NAME="ota_$(date +%Y%m%d_%H%M%S).zip"
-            fi
-
-            echo "Filename: $ZIP_NAME"
-            curl -L "$OTA_URL" -o "$ZIP_NAME" --progress-bar
-          fi
-
-          # Simpan nama file ke env untuk step berikutnya
-          echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
-          ls -lh "$ZIP_NAME"
-
-      # ── Ekstrak payload.bin dari ZIP ────────────────────────────────────────
-      - name: Extract payload.bin from ZIP
-        run: |
-          echo "Extracting from: $ZIP_NAME"
-          unzip -o "$ZIP_NAME" payload.bin -d extracted/ || {
-            echo "payload.bin tidak ditemukan di root ZIP, coba cari di subdirektori..."
-            unzip -o "$ZIP_NAME" "*/payload.bin" -d extracted/
-            find extracted/ -name "payload.bin" -exec mv {} extracted/payload.bin \;
-          }
-          ls -lh extracted/payload.bin
-
-      # ── Dump partisi dari payload.bin ───────────────────────────────────────
-      - name: Dump partitions
-        run: |
-          mkdir -p output
-
-          PARTITIONS="${{ github.event.inputs.partitions }}"
-
-          if [ -z "$PARTITIONS" ]; then
-            echo "Mengekstrak SEMUA partisi..."
-            ./payload-dumper-go -o output/ extracted/payload.bin
-          else
-            echo "Mengekstrak partisi: $PARTITIONS"
-            # payload-dumper-go pakai flag -partitions
-            ./payload-dumper-go -o output/ -partitions "$PARTITIONS" extracted/payload.bin
-          fi
-
-          echo ""
-          echo "=== Hasil ekstraksi ==="
-          ls -lh output/
-
-      # ── Compress output ─────────────────────────────────────────────────────
-      - name: Compress output
-        run: |
-          cd output
-          zip -r ../extracted_partitions.zip .
-          cd ..
-          ls -lh extracted_partitions.zip
-
-      # ── Upload sebagai GitHub Actions Artifact ──────────────────────────────
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: extracted-partitions
-          path: output/
-          retention-days: 7
-
-      # ── Upload ke GitHub Release (opsional) ─────────────────────────────────
-      - name: Upload to GitHub Release
-        if: ${{ github.event.inputs.release_tag != '' }}
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.event.inputs.release_tag }}
-          name: "Extracted Partitions - ${{ github.event.inputs.release_tag }}"
-          body: |
-            ## Extracted from OTA
-            **Source:** `${{ github.event.inputs.ota_url }}`
             **Partitions:** `${{ github.event.inputs.partitions || 'all' }}`
           files: |
             output/*.img
