@@ -1,4 +1,4 @@
-name: Extract Payload & Firmware
+name: Extract Firmware
 
 on:
   workflow_dispatch:
@@ -243,43 +243,83 @@ jobs:
           echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
           ls -lh "$ZIP_NAME"
 
-      - name: Detect ZIP type and extract
+      - name: Install extraction tools
         run: |
-          mkdir -p extracted output
-          echo "=== Isi ZIP ==="
-          unzip -l "$ZIP_NAME" | head -60
+          sudo apt-get update -qq
+          sudo apt-get install -y unrar p7zip-full xz-utils
 
-          if unzip -l "$ZIP_NAME" | grep -q "payload\.bin"; then
+      - name: Detect archive type and extract
+        run: |
+          mkdir -p extracted output archive_tmp
+          echo "File: $ZIP_NAME"
+          ls -lh "$ZIP_NAME"
+
+          FNAME="${ZIP_NAME,,}"
+
+          if [[ "$FNAME" == *.tar.xz ]] || [[ "$FNAME" == *.txz ]]; then
+            echo "FORMAT: tar.xz"
+            tar -xJf "$ZIP_NAME" -C archive_tmp/
+
+          elif [[ "$FNAME" == *.tar.gz ]] || [[ "$FNAME" == *.tgz ]]; then
+            echo "FORMAT: tar.gz"
+            tar -xzf "$ZIP_NAME" -C archive_tmp/
+
+          elif [[ "$FNAME" == *.tar.bz2 ]] || [[ "$FNAME" == *.tbz2 ]]; then
+            echo "FORMAT: tar.bz2"
+            tar -xjf "$ZIP_NAME" -C archive_tmp/
+
+          elif [[ "$FNAME" == *.7z ]]; then
+            echo "FORMAT: 7z"
+            7z x "$ZIP_NAME" -o"archive_tmp/"
+
+          elif [[ "$FNAME" == *.rar ]]; then
+            echo "FORMAT: rar"
+            unrar x "$ZIP_NAME" archive_tmp/
+
+          elif [[ "$FNAME" == *.xz ]]; then
+            echo "FORMAT: xz (single file)"
+            cp "$ZIP_NAME" archive_tmp/
+            xz -d archive_tmp/*.xz
+
+          elif [[ "$FNAME" == *.zip ]] || [[ "$FNAME" == *.jar ]] || [[ "$FNAME" == *.download ]]; then
+            echo "FORMAT: zip/jar/download"
+            unzip -o "$ZIP_NAME" -d archive_tmp/
+
+          else
+            echo "FORMAT tidak dikenal, mencoba deteksi otomatis..."
+            unzip -o "$ZIP_NAME" -d archive_tmp/ 2>/dev/null ||             7z x "$ZIP_NAME" -o"archive_tmp/" 2>/dev/null || {
+              echo "ERROR: Format tidak didukung!"
+              file "$ZIP_NAME"
+              exit 1
+            }
+          fi
+
+          echo ""
+          echo "=== Isi archive ==="
+          find archive_tmp/ | head -40
+
+          if find archive_tmp/ -name "payload.bin" | grep -q .; then
             echo "MODE: OTA - payload.bin ditemukan"
             echo "EXTRACT_MODE=payload" >> $GITHUB_ENV
-
-            unzip -o "$ZIP_NAME" payload.bin -d extracted/ || {
-              unzip -o "$ZIP_NAME" "*/payload.bin" -d extracted/
-              find extracted/ -name "payload.bin" -exec mv {} extracted/payload.bin \;
-            }
+            find archive_tmp/ -name "payload.bin" -exec mv {} extracted/payload.bin \;
             ls -lh extracted/payload.bin
 
-          elif unzip -l "$ZIP_NAME" | grep -q "\.img"; then
-            echo "MODE: Fastboot ROM - .img ditemukan langsung"
+          elif find archive_tmp/ -name "*.img" | grep -q .; then
+            echo "MODE: Fastboot ROM - .img ditemukan"
             echo "EXTRACT_MODE=fastboot" >> $GITHUB_ENV
 
             PARTITIONS="${{ github.event.inputs.partitions }}"
 
             if [ -z "$PARTITIONS" ]; then
               echo "Mengekstrak SEMUA .img..."
-              unzip -o "$ZIP_NAME" "*.img" -d output/ 2>/dev/null || true
-              unzip -o "$ZIP_NAME" "*/*.img" -d output/ 2>/dev/null || true
-              find output/ -mindepth 2 -name "*.img" -exec mv {} output/ \;
+              find archive_tmp/ -name "*.img" -exec mv {} output/ \;
             else
               echo "Mengekstrak partisi: $PARTITIONS"
               IFS=',' read -ra PARTS <<< "$PARTITIONS"
               for PART in "${PARTS[@]}"; do
                 PART=$(echo "$PART" | tr -d ' ')
-                unzip -o "$ZIP_NAME" "${PART}.img" -d output/ 2>/dev/null || \
-                unzip -o "$ZIP_NAME" "*/${PART}.img" -d output/ 2>/dev/null || \
-                echo "WARN: ${PART}.img tidak ditemukan"
+                find archive_tmp/ -name "${PART}.img" -exec mv {} output/ \; ||                 echo "WARN: ${PART}.img tidak ditemukan"
               done
-              find output/ -mindepth 2 -name "*.img" -exec mv {} output/ \;
             fi
 
             echo ""
@@ -287,8 +327,8 @@ jobs:
             ls -lh output/*.img 2>/dev/null || echo "Tidak ada .img ditemukan!"
 
           else
-            echo "ERROR: Tidak ditemukan payload.bin maupun .img di dalam ZIP!"
-            unzip -l "$ZIP_NAME"
+            echo "ERROR: Tidak ditemukan payload.bin maupun .img!"
+            find archive_tmp/
             exit 1
           fi
 
