@@ -1,4 +1,4 @@
-name: Extract Payload & Firmware
+name: Extract Firmware
 
 on:
   workflow_dispatch:
@@ -87,18 +87,44 @@ jobs:
             if echo "$OTA_URL" | grep -q "gofile.io"; then
               echo "Detected: Gofile"
               FILE_ID=$(echo "$OTA_URL" | grep -oP '(?<=gofile\.io/d/)[^/?]+')
-              TOKEN=$(curl -s "https://api.gofile.io/accounts" -X POST \
-                | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['data']['token'])")
-              INFO=$(curl -s "https://api.gofile.io/contents/${FILE_ID}?wt=4fd6sg89d7s6&cache=true" \
-                -H "Authorization: Bearer $TOKEN")
+
+              # Ambil guest token
+              TOKEN=$(curl -s "https://api.gofile.io/accounts" -X POST                 | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['data']['token'])")
+              echo "Token: $TOKEN"
+
+              # Fetch file info dengan cookie + auth header
+              INFO=$(curl -s "https://api.gofile.io/contents/${FILE_ID}?wt=4fd6sg89d7s6&cache=true"                 -H "Authorization: Bearer $TOKEN"                 -H "Cookie: accountToken=$TOKEN")
+
+              # Parse response — handle berbagai struktur API Gofile
               echo "$INFO" | python3 -c "
           import sys, json
           d = json.load(sys.stdin)
-          for f in d['data']['children'].values():
-              if f['type'] == 'file':
-                  print(f['name'] + '|' + f['link'])
+          if d.get('status') != 'ok':
+              print('ERROR: Gofile status =', d.get('status'), file=sys.stderr)
+              sys.exit(1)
+          data = d.get('data', {})
+          # Coba 'children' (lama) atau 'contents' (baru)
+          children = data.get('children') or data.get('contents') or {}
+          if isinstance(children, dict):
+              items = list(children.values())
+          elif isinstance(children, list):
+              items = children
+          else:
+              print('ERROR: children/contents tidak ditemukan', file=sys.stderr)
+              print(json.dumps(data, indent=2), file=sys.stderr)
+              sys.exit(1)
+          for f in items:
+              if isinstance(f, dict) and f.get('type') == 'file':
+                  link = f.get('link') or f.get('downloadPage') or ''
+                  if link:
+                      print(f['name'] + '|' + link)
           " > gofile_tmp.txt
+
+              echo "=== Files found on Gofile ==="
+              cat gofile_tmp.txt
+
               while IFS='|' read -r FNAME FLINK; do
+                [ -z "$FLINK" ] && continue
                 fast_download "$FLINK" "$FNAME" "--header=Cookie:accountToken=$TOKEN"
               done < gofile_tmp.txt
 
