@@ -1,18 +1,22 @@
-name: Extract Firmware
+name: Extract Payload & Firmware
 
 on:
   workflow_dispatch:
     inputs:
       ota_url:
-        description: "URL OTA/Firmware ZIP (Gofile, Pixeldrain, MediaFire, GDrive, OneDrive, SourceForge, AFH, atau direct link)"
+        description: "URL firmware (Gofile, Pixeldrain, MediaFire, GDrive, OneDrive, SourceForge, AFH, direct link)"
         required: true
         type: string
+      extra_urls:
+        description: "URL part tambahan untuk split firmware, pisah dengan koma (opsional)"
+        required: false
+        type: string
       partitions:
-        description: "Partisi yang diekstrak (kosongkan = semua, contoh: boot,vendor_boot)"
+        description: "Partisi yang diekstrak, pisah koma (kosong = semua). Contoh: boot,vendor_boot,init_boot"
         required: false
         type: string
       release_tag:
-        description: "Tag untuk GitHub Release (kosongkan = tidak upload ke release)"
+        description: "Tag GitHub Release (kosongkan = tidak upload ke release)"
         required: false
         type: string
 
@@ -26,278 +30,297 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y unrar p7zip-full xz-utils aria2
+
       - name: Download payload-dumper-go
         run: |
           LATEST=$(curl -s https://api.github.com/repos/ssut/payload-dumper-go/releases/latest \
             | grep "browser_download_url.*linux_amd64.tar.gz" \
             | cut -d '"' -f 4)
-          echo "Downloading: $LATEST"
           curl -L "$LATEST" -o payload-dumper-go.tar.gz
           tar -xzf payload-dumper-go.tar.gz
           chmod +x payload-dumper-go
           ./payload-dumper-go --version || true
 
-      - name: Download ZIP
+      - name: Download firmware parts
         run: |
-          OTA_URL="${{ github.event.inputs.ota_url }}"
-          echo "Source URL: $OTA_URL"
+          mkdir -p downloads
 
-          # ── Helper: ambil nama file dari path URL ───────────────────────────
+          # ── aria2c wrapper: 16 koneksi paralel ─────────────────────────────
+          fast_download() {
+            local URL="$1"
+            local OUT="$2"
+            shift 2
+            aria2c "$URL" \
+              --out="$OUT" \
+              --dir="downloads" \
+              --max-connection-per-server=16 \
+              --min-split-size=5M \
+              --split=16 \
+              --file-allocation=none \
+              --console-log-level=notice \
+              "$@"
+          }
+
           get_name_from_url() {
             basename "$(echo "$1" | cut -d'?' -f1)"
           }
 
-          # ── Helper: ambil nama dari Content-Disposition ─────────────────────
           get_name_from_headers() {
             curl -sI -L "$1" \
               | grep -i "content-disposition" \
-              | grep -oP 'filename=\K[^\r\n;]+' \
+              | grep -oP 'filename=[^ \r\n;]+' \
+              | sed 's/filename=//' \
               | tr -d '"' | head -1 | tr -d '\r'
           }
 
-          # ════════════════════════════════════════════════════════════════════
-          # Gofile
-          # ════════════════════════════════════════════════════════════════════
-          if echo "$OTA_URL" | grep -q "gofile.io"; then
-            echo "Detected: Gofile"
-            FILE_ID=$(echo "$OTA_URL" | grep -oP '(?<=gofile\.io/d/)[^/?]+')
+          # ── Fungsi download satu URL ─────────────────────────────────────────
+          download_one() {
+            local OTA_URL="$1"
+            echo ""
+            echo ">>> Downloading: $OTA_URL"
 
-            TOKEN=$(curl -s "https://api.gofile.io/accounts" -X POST \
-              | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['data']['token'])")
-
-            INFO=$(curl -s "https://api.gofile.io/contents/${FILE_ID}?wt=4fd6sg89d7s6&cache=true" \
-              -H "Authorization: Bearer $TOKEN")
-            echo "$INFO" | python3 -c "
+            # ── Gofile ────────────────────────────────────────────────────────
+            if echo "$OTA_URL" | grep -q "gofile.io"; then
+              echo "Detected: Gofile"
+              FILE_ID=$(echo "$OTA_URL" | grep -oP '(?<=gofile\.io/d/)[^/?]+')
+              TOKEN=$(curl -s "https://api.gofile.io/accounts" -X POST \
+                | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['data']['token'])")
+              INFO=$(curl -s "https://api.gofile.io/contents/${FILE_ID}?wt=4fd6sg89d7s6&cache=true" \
+                -H "Authorization: Bearer $TOKEN")
+              echo "$INFO" | python3 -c "
           import sys, json
           d = json.load(sys.stdin)
           for f in d['data']['children'].values():
               if f['type'] == 'file':
                   print(f['name'] + '|' + f['link'])
-          " > gofile_files.txt
-            cat gofile_files.txt
+          " > gofile_tmp.txt
+              while IFS='|' read -r FNAME FLINK; do
+                fast_download "$FLINK" "$FNAME" "--header=Cookie:accountToken=$TOKEN"
+              done < gofile_tmp.txt
 
-            FIRST=$(grep "\.zip" gofile_files.txt | head -1 || head -1 gofile_files.txt)
-            ZIP_NAME=$(echo "$FIRST" | cut -d'|' -f1)
-            ZIP_LINK=$(echo "$FIRST" | cut -d'|' -f2)
-            curl -L "$ZIP_LINK" -H "Cookie: accountToken=$TOKEN" -o "$ZIP_NAME" --progress-bar
+            # ── Pixeldrain ──────────────────────────────────────────────────
+            elif echo "$OTA_URL" | grep -q "pixeldrain.com"; then
+              echo "Detected: Pixeldrain"
+              FILE_ID=$(echo "$OTA_URL" | grep -oP '(?<=pixeldrain\.com/u/)[^/?]+')
+              FNAME=$(curl -s "https://pixeldrain.com/api/file/${FILE_ID}/info" \
+                | python3 -c "import sys,json; print(json.load(sys.stdin)['name'])")
+              fast_download "https://pixeldrain.com/api/file/${FILE_ID}" "$FNAME"
 
-          # ════════════════════════════════════════════════════════════════════
-          # Pixeldrain
-          # ════════════════════════════════════════════════════════════════════
-          elif echo "$OTA_URL" | grep -q "pixeldrain.com"; then
-            echo "Detected: Pixeldrain"
-            FILE_ID=$(echo "$OTA_URL" | grep -oP '(?<=pixeldrain\.com/u/)[^/?]+')
+            # ── MediaFire ───────────────────────────────────────────────────
+            elif echo "$OTA_URL" | grep -q "mediafire.com"; then
+              echo "Detected: MediaFire"
+              DIRECT=$(curl -s "$OTA_URL" | grep -oP 'https://download[^"<>]+' | head -1)
+              FNAME=$(get_name_from_url "$OTA_URL" | sed 's|/file$||')
+              [ -z "$FNAME" ] && FNAME="mediafire_$(date +%Y%m%d_%H%M%S)"
+              fast_download "$DIRECT" "$FNAME"
 
-            ZIP_NAME=$(curl -s "https://pixeldrain.com/api/file/${FILE_ID}/info" \
-              | python3 -c "import sys,json; print(json.load(sys.stdin)['name'])")
-
-            curl -L "https://pixeldrain.com/api/file/${FILE_ID}" -o "$ZIP_NAME" --progress-bar
-
-          # ════════════════════════════════════════════════════════════════════
-          # MediaFire
-          # ════════════════════════════════════════════════════════════════════
-          elif echo "$OTA_URL" | grep -q "mediafire.com"; then
-            echo "Detected: MediaFire"
-
-            # Scrape direct download link dari halaman MediaFire
-            DIRECT=$(curl -s "$OTA_URL" \
-              | grep -oP '(?<=href=")[^"]*mediafire\.com/file/[^"]*' \
-              | head -1)
-
-            if [ -z "$DIRECT" ]; then
-              # Coba format /file/ langsung
-              DIRECT=$(curl -sL "$OTA_URL" \
-                | grep -oP 'https://download[^"]+' \
-                | head -1)
-            fi
-
-            echo "Direct link: $DIRECT"
-            ZIP_NAME=$(get_name_from_url "$OTA_URL")
-            # Hapus trailing /file/ path
-            ZIP_NAME=$(echo "$ZIP_NAME" | sed 's|/file$||')
-            [ -z "$ZIP_NAME" ] && ZIP_NAME="firmware_$(date +%Y%m%d_%H%M%S).zip"
-
-            curl -L "$DIRECT" -o "$ZIP_NAME" --progress-bar
-
-          # ════════════════════════════════════════════════════════════════════
-          # Google Drive
-          # ════════════════════════════════════════════════════════════════════
-          elif echo "$OTA_URL" | grep -qE "drive.google.com|docs.google.com"; then
-            echo "Detected: Google Drive"
-
-            # Install gdown versi terbaru
-            pip install --upgrade gdown --quiet --break-system-packages
-
-            # Ekstrak file ID dari berbagai format URL GDrive
-            FILE_ID=$(echo "$OTA_URL" | grep -oP '(?<=/d/)[^/?]+')
-            if [ -z "$FILE_ID" ]; then
-              FILE_ID=$(echo "$OTA_URL" | grep -oP '(?<=id=)[^&]+')
-            fi
-            echo "GDrive ID: $FILE_ID"
-            GDRIVE_DIRECT="https://drive.google.com/uc?id=${FILE_ID}&export=download"
-
-            # Download ke folder sementara untuk ambil nama file asli
-            mkdir -p gdrive_tmp
-            gdown "$GDRIVE_DIRECT" --output gdrive_tmp/ || {
-              echo "gdown gagal, coba dengan format URL alternatif..."
+            # ── Google Drive ────────────────────────────────────────────────
+            elif echo "$OTA_URL" | grep -qE "drive.google.com|docs.google.com"; then
+              echo "Detected: Google Drive"
+              pip install --upgrade gdown --quiet --break-system-packages
+              FILE_ID=$(echo "$OTA_URL" | grep -oP '(?<=/d/)[^/?]+')
+              [ -z "$FILE_ID" ] && FILE_ID=$(echo "$OTA_URL" | grep -oP '(?<=id=)[^&]+')
+              mkdir -p gdrive_tmp
+              gdown "https://drive.google.com/uc?id=${FILE_ID}&export=download" --output gdrive_tmp/ || \
               gdown "https://drive.google.com/open?id=${FILE_ID}" --output gdrive_tmp/
-            }
+              mv gdrive_tmp/* downloads/ 2>/dev/null || true
 
-            # Ambil nama file hasil download
-            ZIP_NAME=$(ls gdrive_tmp/ | head -1)
-            if [ -z "$ZIP_NAME" ]; then
-              ZIP_NAME="gdrive_$(date +%Y%m%d_%H%M%S).zip"
-            fi
-            echo "Filename: $ZIP_NAME"
-            mv "gdrive_tmp/$ZIP_NAME" "./$ZIP_NAME"
-
-          # ════════════════════════════════════════════════════════════════════
-          # OneDrive
-          # ════════════════════════════════════════════════════════════════════
-          elif echo "$OTA_URL" | grep -qE "onedrive.live.com|1drv.ms|sharepoint.com"; then
-            echo "Detected: OneDrive"
-
-            # Konversi share link ke direct download
-            if echo "$OTA_URL" | grep -q "1drv.ms"; then
-              # Resolve short URL dulu
-              RESOLVED=$(curl -sI "$OTA_URL" | grep -i "location:" | awk '{print $2}' | tr -d '\r')
-              [ -z "$RESOLVED" ] && RESOLVED="$OTA_URL"
-            else
-              RESOLVED="$OTA_URL"
-            fi
-
-            # Encode URL dan konversi ke direct download
-            ENCODED=$(python3 -c "
+            # ── OneDrive ────────────────────────────────────────────────────
+            elif echo "$OTA_URL" | grep -qE "onedrive.live.com|1drv.ms|sharepoint.com"; then
+              echo "Detected: OneDrive"
+              ENCODED=$(python3 -c "
           import base64, sys
           url = sys.argv[1]
-          b = base64.b64encode(url.encode()).decode()
-          b = b.rstrip('=').replace('+','-').replace('/','_')
+          b = base64.b64encode(url.encode()).decode().rstrip('=').replace('+','-').replace('/','_')
           print('https://api.onedrive.com/v1.0/shares/u!' + b + '/root/content')
-          " "$RESOLVED")
+          " "$OTA_URL")
+              FNAME=$(get_name_from_headers "$ENCODED")
+              [ -z "$FNAME" ] && FNAME="onedrive_$(date +%Y%m%d_%H%M%S)"
+              fast_download "$ENCODED" "$FNAME"
 
-            echo "Direct URL: $ENCODED"
-            ZIP_NAME=$(get_name_from_headers "$ENCODED")
-            [ -z "$ZIP_NAME" ] && ZIP_NAME="onedrive_$(date +%Y%m%d_%H%M%S).zip"
+            # ── SourceForge ─────────────────────────────────────────────────
+            elif echo "$OTA_URL" | grep -q "sourceforge.net"; then
+              echo "Detected: SourceForge"
+              FNAME=$(get_name_from_headers "$OTA_URL")
+              [ -z "$FNAME" ] && FNAME=$(get_name_from_url "$OTA_URL")
+              [ -z "$FNAME" ] && FNAME="sourceforge_$(date +%Y%m%d_%H%M%S)"
+              fast_download "$OTA_URL" "$FNAME"
 
-            echo "Filename: $ZIP_NAME"
-            curl -L "$ENCODED" -o "$ZIP_NAME" --progress-bar
+            # ── AndroidFileHost ─────────────────────────────────────────────
+            elif echo "$OTA_URL" | grep -q "androidfilehost.com"; then
+              echo "Detected: AndroidFileHost"
+              FID=$(echo "$OTA_URL" | grep -oP '(?<=fid=)[^&]+')
+              DIRECT=$(curl -sL \
+                -H "User-Agent: Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36" \
+                -H "Referer: https://androidfilehost.com" \
+                "$OTA_URL" \
+                | grep -oP '(?<=href=")[^"]*androidfilehost[^"]*download[^"]*' | head -1)
+              [ -z "$DIRECT" ] && DIRECT="https://androidfilehost.com/?fid=${FID}&action=download"
+              FNAME=$(get_name_from_url "$OTA_URL")
+              [ -z "$FNAME" ] && FNAME="afh_$(date +%Y%m%d_%H%M%S)"
+              fast_download "$DIRECT" "$FNAME" \
+                "--header=User-Agent:Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36" \
+                "--header=Referer:https://androidfilehost.com"
 
-          # ════════════════════════════════════════════════════════════════════
-          # SourceForge
-          # ════════════════════════════════════════════════════════════════════
-          elif echo "$OTA_URL" | grep -q "sourceforge.net"; then
-            echo "Detected: SourceForge"
-
-            # SourceForge redirect otomatis ke mirror, tinggal follow
-            ZIP_NAME=$(get_name_from_headers "$OTA_URL")
-            [ -z "$ZIP_NAME" ] && ZIP_NAME=$(get_name_from_url "$OTA_URL")
-            [ -z "$ZIP_NAME" ] && ZIP_NAME="sourceforge_$(date +%Y%m%d_%H%M%S).zip"
-
-            echo "Filename: $ZIP_NAME"
-            curl -L "$OTA_URL" -o "$ZIP_NAME" --progress-bar
-
-          # ════════════════════════════════════════════════════════════════════
-          # AndroidFileHost
-          # ════════════════════════════════════════════════════════════════════
-          elif echo "$OTA_URL" | grep -q "androidfilehost.com"; then
-            echo "Detected: AndroidFileHost"
-
-            # Ambil fid dari URL
-            FID=$(echo "$OTA_URL" | grep -oP '(?<=fid=)[^&]+')
-            echo "AFH FID: $FID"
-
-            # Scrape direct link
-            DIRECT=$(curl -sL \
-              -H "User-Agent: Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36" \
-              -H "Referer: https://androidfilehost.com" \
-              "$OTA_URL" \
-              | grep -oP '(?<=href=")[^"]*androidfilehost[^"]*download[^"]*' \
-              | head -1)
-
-            if [ -z "$DIRECT" ]; then
-              DIRECT="https://androidfilehost.com/?fid=${FID}&action=download"
+            # ── Direct URL (fallback) ────────────────────────────────────────
+            else
+              echo "Detected: Direct URL"
+              FNAME=$(get_name_from_headers "$OTA_URL")
+              [ -z "$FNAME" ] && FNAME=$(get_name_from_url "$OTA_URL")
+              [ -z "$FNAME" ] && FNAME="firmware_$(date +%Y%m%d_%H%M%S)"
+              fast_download "$OTA_URL" "$FNAME"
             fi
+          }
 
-            ZIP_NAME=$(get_name_from_url "$OTA_URL")
-            [ -z "$ZIP_NAME" ] && ZIP_NAME="afh_$(date +%Y%m%d_%H%M%S).zip"
+          # ── Download URL utama ───────────────────────────────────────────────
+          download_one "${{ github.event.inputs.ota_url }}"
 
-            echo "Filename: $ZIP_NAME"
-            curl -L "$DIRECT" \
-              -H "User-Agent: Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36" \
-              -H "Referer: https://androidfilehost.com" \
-              -o "$ZIP_NAME" --progress-bar
-
-          # ════════════════════════════════════════════════════════════════════
-          # Direct URL (fallback)
-          # ════════════════════════════════════════════════════════════════════
-          else
-            echo "Detected: Direct URL"
-            ZIP_NAME=$(get_name_from_headers "$OTA_URL")
-            [ -z "$ZIP_NAME" ] && ZIP_NAME=$(get_name_from_url "$OTA_URL")
-            [ -z "$ZIP_NAME" ] && ZIP_NAME="firmware_$(date +%Y%m%d_%H%M%S).zip"
-
-            echo "Filename: $ZIP_NAME"
-            curl -L "$OTA_URL" -o "$ZIP_NAME" --progress-bar
+          # ── Download URL tambahan (split parts) ──────────────────────────────
+          EXTRA="${{ github.event.inputs.extra_urls }}"
+          if [ -n "$EXTRA" ]; then
+            echo ""
+            echo "=== Downloading split parts ==="
+            IFS=',' read -ra EXTRA_URLS <<< "$EXTRA"
+            for URL in "${EXTRA_URLS[@]}"; do
+              URL=$(echo "$URL" | tr -d ' ')
+              download_one "$URL"
+            done
           fi
 
-          echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
-          ls -lh "$ZIP_NAME"
+          echo ""
+          echo "=== File yang didownload ==="
+          ls -lh downloads/
 
-      - name: Install extraction tools
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y unrar p7zip-full xz-utils
-
-      - name: Detect archive type and extract
+      - name: Merge and extract
         run: |
           mkdir -p extracted output archive_tmp
-          echo "File: $ZIP_NAME"
-          ls -lh "$ZIP_NAME"
+          cd downloads
 
-          FNAME="${ZIP_NAME,,}"
+          echo "=== File di downloads/ ==="
+          ls -lh
 
+          # ── Deteksi split archive ──────────────────────────────────────────
+          # Format: .zip.001/.zip.002, part1/part2, .7z.001, .r00/.r01, dsb.
+
+          MERGED=0
+
+          # Split ZIP: nama.zip.001, nama.zip.002
+          if ls *.zip.001 2>/dev/null | grep -q .; then
+            echo "SPLIT: ZIP multi-part (.zip.001) terdeteksi"
+            FIRST=$(ls *.zip.001 | head -1)
+            BASE="${FIRST%.zip.001}"
+            cat "${BASE}".zip.* > "../${BASE}_merged.zip"
+            echo "MERGED_FILE=${BASE}_merged.zip" >> $GITHUB_ENV
+            MERGED=1
+
+          # Split ZIP: nama.z01, nama.z02, nama.zip
+          elif ls *.z01 2>/dev/null | grep -q .; then
+            echo "SPLIT: ZIP multi-part (.z01) terdeteksi"
+            FIRST=$(ls *.z01 | head -1)
+            BASE="${FIRST%.z01}"
+            zip -FF "${BASE}.zip" --out="../${BASE}_merged.zip" 2>/dev/null || \
+            cat "${BASE}".z* "${BASE}.zip" > "../${BASE}_merged.zip"
+            echo "MERGED_FILE=${BASE}_merged.zip" >> $GITHUB_ENV
+            MERGED=1
+
+          # Split 7z: nama.7z.001, nama.7z.002
+          elif ls *.7z.001 2>/dev/null | grep -q .; then
+            echo "SPLIT: 7z multi-part terdeteksi"
+            FIRST=$(ls *.7z.001 | head -1)
+            BASE="${FIRST%.7z.001}"
+            # 7z handles multi-part natively dengan first part
+            cp "${BASE}.7z.001" "../${BASE}.7z.001"
+            for f in "${BASE}".7z.*; do
+              [ "$f" != "${BASE}.7z.001" ] && cp "$f" "../$f"
+            done
+            echo "MERGED_FILE=${BASE}.7z.001" >> $GITHUB_ENV
+            MERGED=1
+
+          # Split RAR: nama.part1.rar, nama.part2.rar
+          elif ls *.part1.rar 2>/dev/null | grep -q .; then
+            echo "SPLIT: RAR multi-part (.part1.rar) terdeteksi"
+            FIRST=$(ls *.part1.rar | head -1)
+            echo "MERGED_FILE=${FIRST}" >> $GITHUB_ENV
+            cp *.part*.rar ../
+            MERGED=1
+
+          # Split RAR lama: nama.rar, nama.r00, nama.r01
+          elif ls *.r00 2>/dev/null | grep -q .; then
+            echo "SPLIT: RAR multi-part (.r00) terdeteksi"
+            FIRST=$(ls *.rar | head -1)
+            echo "MERGED_FILE=${FIRST}" >> $GITHUB_ENV
+            cp *.rar *.r* ../
+            MERGED=1
+
+          # Tidak ada split — file tunggal
+          else
+            echo "Single file terdeteksi"
+            SINGLE=$(ls | head -1)
+            cp "$SINGLE" "../$SINGLE"
+            echo "MERGED_FILE=${SINGLE}" >> $GITHUB_ENV
+          fi
+
+          cd ..
+          echo ""
+          echo "=== File hasil merge ==="
+          ls -lh "${MERGED_FILE}" 2>/dev/null || ls -lh
+
+      - name: Detect format and extract
+        run: |
+          INFILE="$MERGED_FILE"
+          FNAME="${INFILE,,}"
+          echo "Extracting: $INFILE"
+
+          # ── Ekstrak berdasarkan format ──────────────────────────────────────
           if [[ "$FNAME" == *.tar.xz ]] || [[ "$FNAME" == *.txz ]]; then
             echo "FORMAT: tar.xz"
-            tar -xJf "$ZIP_NAME" -C archive_tmp/
+            tar -xJf "$INFILE" -C archive_tmp/
 
           elif [[ "$FNAME" == *.tar.gz ]] || [[ "$FNAME" == *.tgz ]]; then
             echo "FORMAT: tar.gz"
-            tar -xzf "$ZIP_NAME" -C archive_tmp/
+            tar -xzf "$INFILE" -C archive_tmp/
 
           elif [[ "$FNAME" == *.tar.bz2 ]] || [[ "$FNAME" == *.tbz2 ]]; then
             echo "FORMAT: tar.bz2"
-            tar -xjf "$ZIP_NAME" -C archive_tmp/
+            tar -xjf "$INFILE" -C archive_tmp/
 
-          elif [[ "$FNAME" == *.7z ]]; then
+          elif [[ "$FNAME" == *.7z ]] || [[ "$FNAME" == *.7z.001 ]]; then
             echo "FORMAT: 7z"
-            7z x "$ZIP_NAME" -o"archive_tmp/"
+            7z x "$INFILE" -o"archive_tmp/"
 
-          elif [[ "$FNAME" == *.rar ]]; then
-            echo "FORMAT: rar"
-            unrar x "$ZIP_NAME" archive_tmp/
+          elif [[ "$FNAME" == *.part1.rar ]] || [[ "$FNAME" == *.rar ]]; then
+            echo "FORMAT: rar (multi-part atau single)"
+            unrar x "$INFILE" archive_tmp/
 
           elif [[ "$FNAME" == *.xz ]]; then
             echo "FORMAT: xz (single file)"
-            cp "$ZIP_NAME" archive_tmp/
-            xz -d archive_tmp/*.xz
+            cp "$INFILE" archive_tmp/
+            xz -d "archive_tmp/$(basename "$INFILE")"
 
-          elif [[ "$FNAME" == *.zip ]] || [[ "$FNAME" == *.jar ]] || [[ "$FNAME" == *.download ]]; then
-            echo "FORMAT: zip/jar/download"
-            unzip -o "$ZIP_NAME" -d archive_tmp/
+          elif [[ "$FNAME" == *.zip ]] || [[ "$FNAME" == *.jar ]] \
+            || [[ "$FNAME" == *.download ]] || [[ "$FNAME" == *_merged.zip ]]; then
+            echo "FORMAT: zip"
+            unzip -o "$INFILE" -d archive_tmp/
 
           else
             echo "FORMAT tidak dikenal, mencoba deteksi otomatis..."
-            unzip -o "$ZIP_NAME" -d archive_tmp/ 2>/dev/null ||             7z x "$ZIP_NAME" -o"archive_tmp/" 2>/dev/null || {
+            unzip -o "$INFILE" -d archive_tmp/ 2>/dev/null || \
+            7z x "$INFILE" -o"archive_tmp/" 2>/dev/null || {
               echo "ERROR: Format tidak didukung!"
-              file "$ZIP_NAME"
+              file "$INFILE"
               exit 1
             }
           fi
 
           echo ""
           echo "=== Isi archive ==="
-          find archive_tmp/ | head -40
+          find archive_tmp/ | head -50
 
+          # ── Deteksi payload.bin atau .img ─────────────────────────────────
           if find archive_tmp/ -name "payload.bin" | grep -q .; then
             echo "MODE: OTA - payload.bin ditemukan"
             echo "EXTRACT_MODE=payload" >> $GITHUB_ENV
@@ -314,11 +337,19 @@ jobs:
               echo "Mengekstrak SEMUA .img..."
               find archive_tmp/ -name "*.img" -exec mv {} output/ \;
             else
+              # Normalize ke lowercase, hapus spasi
+              PARTITIONS=$(echo "$PARTITIONS" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
               echo "Mengekstrak partisi: $PARTITIONS"
               IFS=',' read -ra PARTS <<< "$PARTITIONS"
               for PART in "${PARTS[@]}"; do
                 PART=$(echo "$PART" | tr -d ' ')
-                find archive_tmp/ -name "${PART}.img" -exec mv {} output/ \; ||                 echo "WARN: ${PART}.img tidak ditemukan"
+                FOUND=$(find archive_tmp/ -iname "${PART}.img" | head -1)
+                if [ -n "$FOUND" ]; then
+                  mv "$FOUND" output/
+                  echo "OK: ${PART}.img"
+                else
+                  echo "WARN: ${PART}.img tidak ditemukan"
+                fi
               done
             fi
 
@@ -341,6 +372,7 @@ jobs:
             echo "Mengekstrak SEMUA partisi dari payload.bin..."
             ./payload-dumper-go -o output/ extracted/payload.bin
           else
+            PARTITIONS=$(echo "$PARTITIONS" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
             echo "Mengekstrak partisi: $PARTITIONS"
             ./payload-dumper-go -o output/ -partitions "$PARTITIONS" extracted/payload.bin
           fi
@@ -355,6 +387,15 @@ jobs:
           zip -r ../extracted_partitions.zip .
           cd ..
           ls -lh extracted_partitions.zip
+
+      - name: Job summary
+        run: |
+          echo "## Hasil Ekstraksi" >> $GITHUB_STEP_SUMMARY
+          echo "| File | Ukuran |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
+          ls -lh output/*.img 2>/dev/null | awk '{print "| "$9" | "$5" |"}' >> $GITHUB_STEP_SUMMARY || true
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Mode:** $EXTRACT_MODE" >> $GITHUB_STEP_SUMMARY
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
