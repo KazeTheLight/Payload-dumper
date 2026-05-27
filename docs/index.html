@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Payload & Firmware Dumper CI</title>
+  <title>Payload Dumper CI</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;800&display=swap" rel="stylesheet" />
   <style>
@@ -501,23 +501,9 @@
   <script>
     // ── Config ──────────────────────────────────────────────────────────────
     const WORKER_URL = 'https://payloa-dumper.dianpermadibayu.workers.dev';
-    const workerUrlInput = { value: WORKER_URL };
-    const configDot = { className: '' };
-
-    // Load saved worker URL
-    
-    const savedUrl = localStorage.getItem('workerUrl') || WORKER_URL_DEFAULT;
-    workerUrlInput.value = savedUrl;
-    configDot.className = 'config-dot ok';
-    if (savedUrl) {
-      workerUrlInput.value = savedUrl;
-      configDot.className = 'config-dot ok';
-    }
-
-
 
     function getWorkerUrl() {
-      return (localStorage.getItem('workerUrl') || WORKER_URL).replace(/\/$/, '');
+      return WORKER_URL;
     }
 
     // ── Parts ───────────────────────────────────────────────────────────────
@@ -701,4 +687,30 @@
     }
 
     function formatDuration(run) {
-      if (!run
+      if (!run.updated_at || !run.created_at) return '—';
+      const s = Math.floor((new Date(run.updated_at) - new Date(run.created_at)) / 1000);
+      if (s < 60) return `${s}s`;
+      return `${Math.floor(s/60)}m ${s%60}s`;
+    }
+
+    function formatBytes(b) {
+      if (b < 1024) return b + ' B';
+      if (b < 1048576) return (b/1024).toFixed(1) + ' KB';
+      return (b/1048576).toFixed(1) + ' MB';
+    }
+
+    function showToast(msg, type = 'success') {
+      const t = document.getElementById('toast');
+      t.textContent = msg;
+      t.className = `toast ${type} show`;
+      setTimeout(() => t.className = 'toast', 3000);
+    }
+
+    // ── Auto-refresh runs setiap 15 detik ──────────────────────────────────
+    loadRuns();
+    setInterval(() => {
+      if (getWorkerUrl()) loadRuns();
+    }, 15000);
+  </script>
+</body>
+</html>
