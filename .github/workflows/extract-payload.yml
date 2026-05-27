@@ -156,12 +156,41 @@ jobs:
               echo "GDrive ID: $FILE_ID"
 
               mkdir -p gdrive_tmp
-              gdown "https://drive.google.com/uc?id=${FILE_ID}&export=download&confirm=t"                 --output gdrive_tmp/ --no-check-certificate 2>/dev/null ||               gdown "$OTA_URL" --output gdrive_tmp/ --no-check-certificate 2>/dev/null || {
-                echo "gdown gagal, coba curl..."
-                FNAME="gdrive_$(date +%Y%m%d_%H%M%S)"
-                curl -L "$OTA_URL" -H "User-Agent: Mozilla/5.0" -o "gdrive_tmp/$FNAME"
+
+              # Method 1: gdown dengan file ID
+              echo "Trying gdown..."
+              gdown "https://drive.google.com/uc?id=${FILE_ID}&export=download&confirm=t"                 --output gdrive_tmp/ --no-check-certificate 2>/dev/null &&               echo "gdown method 1 success" || {
+
+                # Method 2: gdown dengan URL asli
+                echo "Trying gdown with original URL..."
+                gdown "https://drive.google.com/file/d/${FILE_ID}/view"                   --output gdrive_tmp/ --no-check-certificate --fuzzy 2>/dev/null &&                 echo "gdown method 2 success" || {
+
+                  # Method 3: curl dengan confirm token
+                  echo "Trying curl with confirm token..."
+                  FNAME="gdrive_${FILE_ID}"
+                  # Ambil confirm token dulu
+                  CONFIRM=$(curl -sc /tmp/gcookie                     "https://drive.google.com/uc?id=${FILE_ID}&export=download"                     -H "User-Agent: Mozilla/5.0" |                     grep -oP '(?<=confirm=)[^&"]+' | head -1)
+                  echo "Confirm token: $CONFIRM"
+
+                  if [ -n "$CONFIRM" ]; then
+                    curl -Lb /tmp/gcookie                       "https://drive.google.com/uc?id=${FILE_ID}&export=download&confirm=${CONFIRM}"                       -H "User-Agent: Mozilla/5.0"                       -o "gdrive_tmp/$FNAME" &&                     echo "curl method success" || echo "curl method failed"
+                  else
+                    # Method 4: direct usercontent download
+                    echo "Trying direct usercontent..."
+                    curl -L                       "https://drive.usercontent.google.com/download?id=${FILE_ID}&export=download&confirm=t"                       -H "User-Agent: Mozilla/5.0"                       -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"                       -o "gdrive_tmp/$FNAME"
+                  fi
+                }
               }
-              mv gdrive_tmp/* downloads/ 2>/dev/null || true
+
+              # Hapus file kosong
+              find gdrive_tmp/ -empty -delete 2>/dev/null || true
+              echo "=== gdrive_tmp contents ==="
+              ls -lh gdrive_tmp/ 2>/dev/null || echo "kosong!"
+              mv gdrive_tmp/* downloads/ 2>/dev/null || {
+                echo "ERROR: Gagal download dari Google Drive!"
+                echo "Gunakan Pixeldrain atau direct link sebagai alternatif."
+                exit 1
+              }
 
             # ── OneDrive ────────────────────────────────────────────────────
             elif echo "$OTA_URL" | grep -qE "onedrive.live.com|1drv.ms|sharepoint.com"; then
