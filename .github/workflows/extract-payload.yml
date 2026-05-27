@@ -1,3 +1,4 @@
+
 name: Extract Firmware
 
 on:
@@ -347,13 +348,17 @@ jobs:
           find archive_tmp/ | head -50
 
           # ── Deteksi payload.bin atau .img ─────────────────────────────────
+          echo ""
+          echo "=== Semua file dalam archive ==="
+          find archive_tmp/ -type f | sort
+
           if find archive_tmp/ -name "payload.bin" | grep -q .; then
             echo "MODE: OTA - payload.bin ditemukan"
             echo "EXTRACT_MODE=payload" >> $GITHUB_ENV
             find archive_tmp/ -name "payload.bin" -exec mv {} extracted/payload.bin \;
             ls -lh extracted/payload.bin
 
-          elif find archive_tmp/ -name "*.img" | grep -q .; then
+          elif find archive_tmp/ -type f -name "*.img" | grep -q .; then
             echo "MODE: Fastboot ROM - .img ditemukan"
             echo "EXTRACT_MODE=fastboot" >> $GITHUB_ENV
 
@@ -361,7 +366,9 @@ jobs:
 
             if [ -z "$PARTITIONS" ]; then
               echo "Mengekstrak SEMUA .img..."
-              find archive_tmp/ -name "*.img" -exec mv {} output/ \;
+              find archive_tmp/ -type f -name "*.img" | while read f; do
+                mv "$f" output/
+              done
             else
               # Normalize ke lowercase, hapus spasi
               PARTITIONS=$(echo "$PARTITIONS" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
@@ -369,7 +376,7 @@ jobs:
               IFS=',' read -ra PARTS <<< "$PARTITIONS"
               for PART in "${PARTS[@]}"; do
                 PART=$(echo "$PART" | tr -d ' ')
-                FOUND=$(find archive_tmp/ -iname "${PART}.img" | head -1)
+                FOUND=$(find archive_tmp/ -type f -iname "${PART}.img" | head -1)
                 if [ -n "$FOUND" ]; then
                   mv "$FOUND" output/
                   echo "OK: ${PART}.img"
@@ -381,11 +388,12 @@ jobs:
 
             echo ""
             echo "=== Hasil ekstraksi ==="
-            ls -lh output/*.img 2>/dev/null || echo "Tidak ada .img ditemukan!"
+            ls -lh output/ 2>/dev/null || echo "Output kosong!"
 
           else
             echo "ERROR: Tidak ditemukan payload.bin maupun .img!"
-            find archive_tmp/
+            echo "File yang ada:"
+            find archive_tmp/ -type f | sort
             exit 1
           fi
 
@@ -409,6 +417,15 @@ jobs:
 
       - name: Compress output
         run: |
+          # Cek ada file tidak
+          FILE_COUNT=$(ls output/ 2>/dev/null | wc -l)
+          if [ "$FILE_COUNT" -eq 0 ]; then
+            echo "ERROR: output/ kosong, tidak ada file untuk di-compress!"
+            ls -lah output/ || true
+            exit 1
+          fi
+          echo "=== File yang akan di-compress ==="
+          ls -lh output/
           cd output
           zip -r ../extracted_partitions.zip .
           cd ..
