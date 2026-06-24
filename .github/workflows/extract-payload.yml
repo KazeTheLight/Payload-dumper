@@ -30,26 +30,30 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install tools
+      - name: Install tools & PAC Extractor
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y unrar p7zip-full xz-utils aria2
-
-      - name: Download payload-dumper-go
-        run: |
+          sudo apt-get install -y unrar p7zip-full xz-utils aria2 gcc make
+          
+          # Download payload-dumper-go
           LATEST=$(curl -s https://api.github.com/repos/ssut/payload-dumper-go/releases/latest \
             | grep "browser_download_url.*linux_amd64.tar.gz" \
             | cut -d '"' -f 4)
           curl -L "$LATEST" -o payload-dumper-go.tar.gz
           tar -xzf payload-dumper-go.tar.gz
           chmod +x payload-dumper-go
-          ./payload-dumper-go --version || true
+          sudo mv payload-dumper-go /usr/local/bin/
+          
+          # Build PAC Extractor (C-based ringan)
+          wget -q https://raw.githubusercontent.com/R0rt1z2/pacextractor/main/pacextractor.c -O pacextractor.c
+          gcc -O2 pacextractor.c -o pacextractor
+          chmod +x pacextractor
+          sudo mv pacextractor /usr/local/bin/
 
       - name: Download firmware parts
         run: |
           mkdir -p downloads
-
-          # ── aria2c wrapper: 16 koneksi paralel ─────────────────────────────
+          
           fast_download() {
             local URL="$1"
             local OUT="$2"
@@ -65,161 +69,47 @@ jobs:
               "$@"
           }
 
-          get_name_from_url() {
-            basename "$(echo "$1" | cut -d'?' -f1)"
-          }
+          get_name_from_url() { basename "$(echo "$1" | cut -d'?' -f1)"; }
+          get_name_from_headers() { curl -sI -L "$1" | grep -i "content-disposition" | grep -oP 'filename=[^ \r\n;]+' | sed 's/filename=//' | tr -d '"' | head -1 | tr -d '\r'; }
 
-          get_name_from_headers() {
-            curl -sI -L "$1" \
-              | grep -i "content-disposition" \
-              | grep -oP 'filename=[^ \r\n;]+' \
-              | sed 's/filename=//' \
-              | tr -d '"' | head -1 | tr -d '\r'
-          }
-
-          # ── Fungsi download satu URL ─────────────────────────────────────────
           download_one() {
             local OTA_URL="$1"
-            echo ""
             echo ">>> Downloading: $OTA_URL"
 
-            # ── Gofile ────────────────────────────────────────────────────────
             if echo "$OTA_URL" | grep -q "gofile.io"; then
-              echo "Detected: Gofile"
               FILE_ID=$(echo "$OTA_URL" | grep -oP '(?<=gofile\.io/d/)[^/?]+')
-
-              # Ambil guest token
-              TOKEN=$(curl -s "https://api.gofile.io/accounts" -X POST                 | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['data']['token'])")
-              echo "Token: $TOKEN"
-
-              # Fetch file info dengan cookie + auth header
-              INFO=$(curl -s "https://api.gofile.io/contents/${FILE_ID}?wt=4fd6sg89d7s6&cache=true"                 -H "Authorization: Bearer $TOKEN"                 -H "Cookie: accountToken=$TOKEN")
-
-              # Parse response — handle berbagai struktur API Gofile
+              TOKEN=$(curl -s "https://api.gofile.io/accounts" -X POST | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['token'])")
+              INFO=$(curl -s "https://api.gofile.io/contents/${FILE_ID}?wt=4fd6sg89d7s6&cache=true" -H "Authorization: Bearer $TOKEN" -H "Cookie: accountToken=$TOKEN")
+              
               echo "$INFO" | python3 -c "
-          import sys, json
-          d = json.load(sys.stdin)
-          if d.get('status') != 'ok':
-              print('ERROR: Gofile status =', d.get('status'), file=sys.stderr)
-              sys.exit(1)
-          data = d.get('data', {})
-          # Coba 'children' (lama) atau 'contents' (baru)
-          children = data.get('children') or data.get('contents') or {}
-          if isinstance(children, dict):
-              items = list(children.values())
-          elif isinstance(children, list):
-              items = children
-          else:
-              print('ERROR: children/contents tidak ditemukan', file=sys.stderr)
-              print(json.dumps(data, indent=2), file=sys.stderr)
-              sys.exit(1)
-          for f in items:
-              if isinstance(f, dict) and f.get('type') == 'file':
-                  link = f.get('link') or f.get('downloadPage') or ''
-                  if link:
-                      print(f['name'] + '|' + link)
-          " > gofile_tmp.txt
-
-              echo "=== Files found on Gofile ==="
-              cat gofile_tmp.txt
+              import sys, json
+              d = json.load(sys.stdin)
+              data = d.get('data', {})
+              children = data.get('children') or data.get('contents') or {}
+              items = list(children.values()) if isinstance(children, dict) else (children if isinstance(children, list) else [])
+              for f in items:
+                  if isinstance(f, dict) and f.get('type') == 'file':
+                      link = f.get('link') or f.get('downloadPage') or ''
+                      if link: print(f['name'] + '|' + link)
+              " > gofile_tmp.txt
 
               while IFS='|' read -r FNAME FLINK; do
                 [ -z "$FLINK" ] && continue
                 fast_download "$FLINK" "$FNAME" "--header=Cookie:accountToken=$TOKEN"
               done < gofile_tmp.txt
 
-            # ── Pixeldrain ──────────────────────────────────────────────────
             elif echo "$OTA_URL" | grep -q "pixeldrain.com"; then
-              echo "Detected: Pixeldrain"
               FILE_ID=$(echo "$OTA_URL" | grep -oP '(?<=pixeldrain\.com/u/)[^/?]+')
-              FNAME=$(curl -s "https://pixeldrain.com/api/file/${FILE_ID}/info" \
-                | python3 -c "import sys,json; print(json.load(sys.stdin)['name'])")
+              FNAME=$(curl -s "https://pixeldrain.com/api/file/${FILE_ID}/info" | python3 -c "import sys,json; print(json.load(sys.stdin)['name'])")
               fast_download "https://pixeldrain.com/api/file/${FILE_ID}" "$FNAME"
 
-            # ── MediaFire ───────────────────────────────────────────────────
             elif echo "$OTA_URL" | grep -q "mediafire.com"; then
-              echo "Detected: MediaFire"
               DIRECT=$(curl -s "$OTA_URL" | grep -oP 'https://download[^"<>]+' | head -1)
               FNAME=$(get_name_from_url "$OTA_URL" | sed 's|/file$||')
               [ -z "$FNAME" ] && FNAME="mediafire_$(date +%Y%m%d_%H%M%S)"
               fast_download "$DIRECT" "$FNAME"
 
-            # ── Google Drive ────────────────────────────────────────────────
-            elif echo "$OTA_URL" | grep -qE "drive.google.com|docs.google.com|drive.usercontent.google.com"; then
-              echo "Detected: Google Drive"
-              pip install --upgrade gdown --quiet --break-system-packages
-
-              # Ekstrak file ID
-              FILE_ID=$(echo "$OTA_URL" | grep -oP '(?<=/d/)[^/?]+')
-              [ -z "$FILE_ID" ] && FILE_ID=$(echo "$OTA_URL" | grep -oP '(?<=id=)[^&]+')
-              [ -z "$FILE_ID" ] && FILE_ID=$(echo "$OTA_URL" | grep -oP '(?<=open[?]id=)[^&]+')
-              echo "GDrive ID: $FILE_ID"
-
-              mkdir -p gdrive_tmp
-
-              # Method 1: gdown verbose untuk lihat error
-              echo "=== gdown output ==="
-              gdown "https://drive.google.com/uc?id=${FILE_ID}&export=download&confirm=t"                 --output gdrive_tmp/ --no-check-certificate 2>&1 || true
-
-              # Method 2: curl direct download
-              echo "=== curl method ==="
-              curl -v -L                 "https://drive.google.com/uc?id=${FILE_ID}&export=download&confirm=t"                 -H "User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"                 -c /tmp/gc.txt -b /tmp/gc.txt                 -o gdrive_tmp/gdrive_out 2>&1 | tail -20
-
-              # Cek ukuran file
-              echo "=== File hasil download ==="
-              ls -lh gdrive_tmp/ || true
-              file gdrive_tmp/gdrive_out 2>/dev/null || true
-              head -c 200 gdrive_tmp/gdrive_out 2>/dev/null || true
-
-              # Hapus file HTML/kosong
-              find gdrive_tmp/ -size -10k -delete 2>/dev/null || true
-
-              mv gdrive_tmp/* downloads/ 2>/dev/null || {
-                echo "ERROR: Semua method gagal untuk Google Drive!"
-                echo "Solusi: Upload file ke Pixeldrain lalu gunakan link Pixeldrain."
-                exit 1
-              }
-
-            # ── OneDrive ────────────────────────────────────────────────────
-            elif echo "$OTA_URL" | grep -qE "onedrive.live.com|1drv.ms|sharepoint.com"; then
-              echo "Detected: OneDrive"
-              ENCODED=$(python3 -c "
-          import base64, sys
-          url = sys.argv[1]
-          b = base64.b64encode(url.encode()).decode().rstrip('=').replace('+','-').replace('/','_')
-          print('https://api.onedrive.com/v1.0/shares/u!' + b + '/root/content')
-          " "$OTA_URL")
-              FNAME=$(get_name_from_headers "$ENCODED")
-              [ -z "$FNAME" ] && FNAME="onedrive_$(date +%Y%m%d_%H%M%S)"
-              fast_download "$ENCODED" "$FNAME"
-
-            # ── SourceForge ─────────────────────────────────────────────────
-            elif echo "$OTA_URL" | grep -q "sourceforge.net"; then
-              echo "Detected: SourceForge"
-              FNAME=$(get_name_from_headers "$OTA_URL")
-              [ -z "$FNAME" ] && FNAME=$(get_name_from_url "$OTA_URL")
-              [ -z "$FNAME" ] && FNAME="sourceforge_$(date +%Y%m%d_%H%M%S)"
-              fast_download "$OTA_URL" "$FNAME"
-
-            # ── AndroidFileHost ─────────────────────────────────────────────
-            elif echo "$OTA_URL" | grep -q "androidfilehost.com"; then
-              echo "Detected: AndroidFileHost"
-              FID=$(echo "$OTA_URL" | grep -oP '(?<=fid=)[^&]+')
-              DIRECT=$(curl -sL \
-                -H "User-Agent: Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36" \
-                -H "Referer: https://androidfilehost.com" \
-                "$OTA_URL" \
-                | grep -oP '(?<=href=")[^"]*androidfilehost[^"]*download[^"]*' | head -1)
-              [ -z "$DIRECT" ] && DIRECT="https://androidfilehost.com/?fid=${FID}&action=download"
-              FNAME=$(get_name_from_url "$OTA_URL")
-              [ -z "$FNAME" ] && FNAME="afh_$(date +%Y%m%d_%H%M%S)"
-              fast_download "$DIRECT" "$FNAME" \
-                "--header=User-Agent:Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36" \
-                "--header=Referer:https://androidfilehost.com"
-
-            # ── Direct URL (fallback) ────────────────────────────────────────
             else
-              echo "Detected: Direct URL"
               FNAME=$(get_name_from_headers "$OTA_URL")
               [ -z "$FNAME" ] && FNAME=$(get_name_from_url "$OTA_URL")
               [ -z "$FNAME" ] && FNAME="firmware_$(date +%Y%m%d_%H%M%S)"
@@ -227,248 +117,130 @@ jobs:
             fi
           }
 
-          # ── Download URL utama ───────────────────────────────────────────────
           download_one "${{ github.event.inputs.ota_url }}"
 
-          # ── Download URL tambahan (split parts) ──────────────────────────────
           EXTRA="${{ github.event.inputs.extra_urls }}"
           if [ -n "$EXTRA" ]; then
-            echo ""
-            echo "=== Downloading split parts ==="
             IFS=',' read -ra EXTRA_URLS <<< "$EXTRA"
             for URL in "${EXTRA_URLS[@]}"; do
-              URL=$(echo "$URL" | tr -d ' ')
-              download_one "$URL"
+              download_one "$(echo "$URL" | tr -d ' ')"
             done
           fi
 
-          echo ""
-          echo "=== File yang didownload ==="
-          ls -lh downloads/
-
-      - name: Merge and extract
+      - name: Merge and Fast Detect
         run: |
           mkdir -p extracted output archive_tmp
           cd downloads
 
-          echo "=== File di downloads/ ==="
-          ls -lh
-
-          # ── Deteksi split archive ──────────────────────────────────────────
-          # Format: .zip.001/.zip.002, part1/part2, .7z.001, .r00/.r01, dsb.
-
-          MERGED=0
-
-          # Split ZIP: nama.zip.001, nama.zip.002
-          if ls *.zip.001 2>/dev/null | grep -q .; then
-            echo "SPLIT: ZIP multi-part (.zip.001) terdeteksi"
-            FIRST=$(ls *.zip.001 | head -1)
-            BASE="${FIRST%.zip.001}"
+          # Merge Split Files (Singkat)
+          MERGED_FILE=$(ls | head -1)
+          if ls *.zip.001 >/dev/null 2>&1; then
+            BASE="${MERGED_FILE%.zip.001}"
             cat "${BASE}".zip.* > "../${BASE}_merged.zip"
-            echo "MERGED_FILE=${BASE}_merged.zip" >> $GITHUB_ENV
-            MERGED=1
-
-          # Split ZIP: nama.z01, nama.z02, nama.zip
-          elif ls *.z01 2>/dev/null | grep -q .; then
-            echo "SPLIT: ZIP multi-part (.z01) terdeteksi"
-            FIRST=$(ls *.z01 | head -1)
-            BASE="${FIRST%.z01}"
-            zip -FF "${BASE}.zip" --out="../${BASE}_merged.zip" 2>/dev/null || \
-            cat "${BASE}".z* "${BASE}.zip" > "../${BASE}_merged.zip"
-            echo "MERGED_FILE=${BASE}_merged.zip" >> $GITHUB_ENV
-            MERGED=1
-
-          # Split 7z: nama.7z.001, nama.7z.002
-          elif ls *.7z.001 2>/dev/null | grep -q .; then
-            echo "SPLIT: 7z multi-part terdeteksi"
-            FIRST=$(ls *.7z.001 | head -1)
-            BASE="${FIRST%.7z.001}"
-            # 7z handles multi-part natively dengan first part
-            cp "${BASE}.7z.001" "../${BASE}.7z.001"
-            for f in "${BASE}".7z.*; do
-              [ "$f" != "${BASE}.7z.001" ] && cp "$f" "../$f"
-            done
-            echo "MERGED_FILE=${BASE}.7z.001" >> $GITHUB_ENV
-            MERGED=1
-
-          # Split RAR: nama.part1.rar, nama.part2.rar
-          elif ls *.part1.rar 2>/dev/null | grep -q .; then
-            echo "SPLIT: RAR multi-part (.part1.rar) terdeteksi"
-            FIRST=$(ls *.part1.rar | head -1)
-            echo "MERGED_FILE=${FIRST}" >> $GITHUB_ENV
-            cp *.part*.rar ../
-            MERGED=1
-
-          # Split RAR lama: nama.rar, nama.r00, nama.r01
-          elif ls *.r00 2>/dev/null | grep -q .; then
-            echo "SPLIT: RAR multi-part (.r00) terdeteksi"
-            FIRST=$(ls *.rar | head -1)
-            echo "MERGED_FILE=${FIRST}" >> $GITHUB_ENV
-            cp *.rar *.r* ../
-            MERGED=1
-
-          # Tidak ada split — file tunggal
+            MERGED_FILE="${BASE}_merged.zip"
+          elif ls *.7z.001 >/dev/null 2>&1; then
+            BASE="${MERGED_FILE%.7z.001}"
+            cp "${BASE}".7z.* ../
+            MERGED_FILE="${BASE}.7z.001"
           else
-            echo "Single file terdeteksi"
-            SINGLE=$(ls | head -1)
-            cp "$SINGLE" "../$SINGLE"
-            echo "MERGED_FILE=${SINGLE}" >> $GITHUB_ENV
+            cp "$MERGED_FILE" "../$MERGED_FILE"
           fi
-
           cd ..
-          echo ""
-          echo "=== File hasil merge ==="
-          ls -lh "${MERGED_FILE}" 2>/dev/null || ls -lh
-
-      - name: Detect format and extract
-        run: |
+          
           INFILE="$MERGED_FILE"
           FNAME="${INFILE,,}"
-          echo "Extracting: $INFILE"
+          echo "Processing: $INFILE"
+          echo "MERGED_FILE=$MERGED_FILE" >> $GITHUB_ENV
 
-          # ── Ekstrak berdasarkan format ──────────────────────────────────────
-          if [[ "$FNAME" == *.tar.xz ]] || [[ "$FNAME" == *.txz ]]; then
-            echo "FORMAT: tar.xz"
-            tar -xJf "$INFILE" -C archive_tmp/
-
-          elif [[ "$FNAME" == *.tar.gz ]] || [[ "$FNAME" == *.tgz ]]; then
-            echo "FORMAT: tar.gz"
-            tar -xzf "$INFILE" -C archive_tmp/
-
-          elif [[ "$FNAME" == *.tar.bz2 ]] || [[ "$FNAME" == *.tbz2 ]]; then
-            echo "FORMAT: tar.bz2"
-            tar -xjf "$INFILE" -C archive_tmp/
-
-          elif [[ "$FNAME" == *.7z ]] || [[ "$FNAME" == *.7z.001 ]]; then
-            echo "FORMAT: 7z"
-            7z x "$INFILE" -o"archive_tmp/"
-
-          elif [[ "$FNAME" == *.part1.rar ]] || [[ "$FNAME" == *.rar ]]; then
-            echo "FORMAT: rar (multi-part atau single)"
-            unrar x "$INFILE" archive_tmp/
-
-          elif [[ "$FNAME" == *.xz ]]; then
-            echo "FORMAT: xz (single file)"
-            cp "$INFILE" archive_tmp/
-            xz -d "archive_tmp/$(basename "$INFILE")"
-
-          elif [[ "$FNAME" == *.zip ]] || [[ "$FNAME" == *.jar ]] \
-            || [[ "$FNAME" == *.download ]] || [[ "$FNAME" == *_merged.zip ]]; then
-            echo "FORMAT: zip"
-            unzip -o "$INFILE" -d archive_tmp/
-
+          # FAST DETECTION & SELECTIVE EXTRACTION
+          EXTRACT_MODE="unknown"
+          
+          if [[ "$FNAME" == *.pac ]]; then
+             echo "EXTRACT_MODE=pac" >> $GITHUB_ENV
+             cp "$INFILE" extracted/firmware.pac
+             
+          elif [[ "$FNAME" == *.tgz ]] || [[ "$FNAME" == *.tar.gz ]]; then
+             if tar -tzf "$INFILE" | grep -q "payload.bin"; then
+                echo "EXTRACT_MODE=payload" >> $GITHUB_ENV
+                tar -xzf "$INFILE" --wildcards "*payload.bin" -C extracted/
+             elif tar -tzf "$INFILE" | grep -q "\.img$"; then
+                echo "EXTRACT_MODE=fastboot" >> $GITHUB_ENV
+                tar -xzf "$INFILE" --wildcards "*.img" -C archive_tmp/
+                find archive_tmp/ -name "*.img" -exec mv {} output/ \;
+             fi
+             
           else
-            echo "FORMAT tidak dikenal, mencoba deteksi otomatis..."
-            unzip -o "$INFILE" -d archive_tmp/ 2>/dev/null || \
-            7z x "$INFILE" -o"archive_tmp/" 2>/dev/null || {
-              echo "ERROR: Format tidak didukung!"
-              file "$INFILE"
-              exit 1
-            }
+             # For Zip, 7z, Rar
+             if 7z l "$INFILE" | grep -q "payload.bin"; then
+                echo "EXTRACT_MODE=payload" >> $GITHUB_ENV
+                7z e "$INFILE" "payload.bin" -r -o"extracted/"
+             elif 7z l "$INFILE" | grep -iq "\.pac$"; then
+                echo "EXTRACT_MODE=pac" >> $GITHUB_ENV
+                7z e "$INFILE" "*.pac" -r -o"extracted/"
+                mv extracted/*.pac extracted/firmware.pac
+             elif 7z l "$INFILE" | grep -q "\.img$"; then
+                echo "EXTRACT_MODE=fastboot" >> $GITHUB_ENV
+                7z e "$INFILE" "*.img" -r -o"output/"
+             fi
           fi
 
-          echo ""
-          echo "=== Isi archive ==="
-          find archive_tmp/ | head -50
-
-          # ── Deteksi payload.bin atau .img ─────────────────────────────────
-          echo ""
-          echo "=== Semua file dalam archive ==="
-          find archive_tmp/ -type f | sort
-
-          if find archive_tmp/ -name "payload.bin" | grep -q .; then
-            echo "MODE: OTA - payload.bin ditemukan"
-            echo "EXTRACT_MODE=payload" >> $GITHUB_ENV
-            find archive_tmp/ -name "payload.bin" -exec mv {} extracted/payload.bin \;
-            ls -lh extracted/payload.bin
-
-          elif find archive_tmp/ -type f -name "*.img" | grep -q .; then
-            echo "MODE: Fastboot ROM - .img ditemukan"
-            echo "EXTRACT_MODE=fastboot" >> $GITHUB_ENV
-
-            PARTITIONS="${{ github.event.inputs.partitions }}"
-
-            if [ -z "$PARTITIONS" ]; then
-              echo "Mengekstrak SEMUA .img..."
-              find archive_tmp/ -type f -name "*.img" | while read f; do
-                mv "$f" output/
-              done
-            else
-              # Normalize ke lowercase, hapus spasi
-              PARTITIONS=$(echo "$PARTITIONS" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
-              echo "Mengekstrak partisi: $PARTITIONS"
-              IFS=',' read -ra PARTS <<< "$PARTITIONS"
-              for PART in "${PARTS[@]}"; do
-                PART=$(echo "$PART" | tr -d ' ')
-                FOUND=$(find archive_tmp/ -type f -iname "${PART}.img" | head -1)
-                if [ -n "$FOUND" ]; then
-                  mv "$FOUND" output/
-                  echo "OK: ${PART}.img"
-                else
-                  echo "WARN: ${PART}.img tidak ditemukan"
-                fi
-              done
-            fi
-
-            echo ""
-            echo "=== Hasil ekstraksi ==="
-            ls -lh output/ 2>/dev/null || echo "Output kosong!"
-
-          else
-            echo "ERROR: Tidak ditemukan payload.bin maupun .img!"
-            echo "File yang ada:"
-            find archive_tmp/ -type f | sort
-            exit 1
+          # Fallback jika deteksi pintar gagal
+          if [ ! -f "extracted/payload.bin" ] && [ ! -f "extracted/firmware.pac" ] && [ -z "$(ls -A output/ 2>/dev/null)" ]; then
+             echo "Selective extraction gagal, mengekstrak secara manual..."
+             7z x "$INFILE" -o"archive_tmp/"
+             find archive_tmp/ -name "payload.bin" -exec mv {} extracted/payload.bin \;
+             find archive_tmp/ -name "*.pac" -exec mv {} extracted/firmware.pac \;
+             find archive_tmp/ -name "*.img" -exec mv {} output/ \;
           fi
 
-      - name: Dump payload.bin
-        if: env.EXTRACT_MODE == 'payload'
+      - name: Process Payload / PAC
         run: |
           PARTITIONS="${{ github.event.inputs.partitions }}"
-
-          if [ -z "$PARTITIONS" ]; then
-            echo "Mengekstrak SEMUA partisi dari payload.bin..."
-            ./payload-dumper-go -o output/ extracted/payload.bin
-          else
+          PART_ARGS=""
+          if [ -n "$PARTITIONS" ]; then
             PARTITIONS=$(echo "$PARTITIONS" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
-            echo "Mengekstrak partisi: $PARTITIONS"
-            ./payload-dumper-go -o output/ -partitions "$PARTITIONS" extracted/payload.bin
+            PART_ARGS="-partitions $PARTITIONS"
+            echo "Target partisi: $PARTITIONS"
           fi
 
-          echo ""
-          echo "=== Hasil ekstraksi ==="
-          ls -lh output/
-
-      - name: Compress output
-        run: |
-          # Cek ada file tidak
-          FILE_COUNT=$(ls output/ 2>/dev/null | wc -l)
-          if [ "$FILE_COUNT" -eq 0 ]; then
-            echo "ERROR: output/ kosong, tidak ada file untuk di-compress!"
-            ls -lah output/ || true
-            exit 1
+          if [ -f "extracted/payload.bin" ]; then
+            echo "Mengurai payload.bin..."
+            payload-dumper-go -o output/ $PART_ARGS extracted/payload.bin
+          elif [ -f "extracted/firmware.pac" ]; then
+            echo "Mengurai file .PAC (Unisoc)..."
+            pacextractor extracted/firmware.pac output/
+            
+            # Jika user meminta partisi spesifik pada PAC
+            if [ -n "$PARTITIONS" ]; then
+              mkdir -p output_filtered
+              IFS=',' read -ra PARTS <<< "$PARTITIONS"
+              for PART in "${PARTS[@]}"; do
+                mv output/"${PART}.img" output_filtered/ 2>/dev/null || mv output/"${PART}.bin" output_filtered/ 2>/dev/null || true
+              done
+              rm -rf output/*
+              mv output_filtered/* output/
+            fi
           fi
-          echo "=== File yang akan di-compress ==="
+
+          # Bersihkan file selain img/bin agar rapi
+          find output/ -type f ! -name "*.img" ! -name "*.bin" -delete 2>/dev/null || true
+          
+          echo "=== Hasil Ekstraksi di output/ ==="
           ls -lh output/
-          cd output
-          zip -r ../extracted_partitions.zip .
-          cd ..
-          ls -lh extracted_partitions.zip
 
       - name: Job summary
         run: |
           echo "## Hasil Ekstraksi" >> $GITHUB_STEP_SUMMARY
+          echo "**Mode:** $(cat $GITHUB_ENV | grep EXTRACT_MODE | cut -d'=' -f2)" >> $GITHUB_STEP_SUMMARY
           echo "| File | Ukuran |" >> $GITHUB_STEP_SUMMARY
           echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
-          ls -lh output/*.img 2>/dev/null | awk '{print "| "$9" | "$5" |"}' >> $GITHUB_STEP_SUMMARY || true
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Mode:** $EXTRACT_MODE" >> $GITHUB_STEP_SUMMARY
+          ls -lh output/ 2>/dev/null | awk '{print "| "$9" | "$5" |"}' | grep -v "|  |" >> $GITHUB_STEP_SUMMARY || true
 
-      - name: Upload artifact
+      - name: Upload artifact (GitHub Actions)
         uses: actions/upload-artifact@v4
         with:
           name: extracted-partitions
-          path: output/
+          path: output/*
           retention-days: 7
 
       - name: Upload to GitHub Release
@@ -480,9 +252,7 @@ jobs:
           body: |
             ## Extracted from Firmware
             **Source:** `${{ github.event.inputs.ota_url }}`
-            **Mode:** `${{ env.EXTRACT_MODE }}`
             **Partitions:** `${{ github.event.inputs.partitions || 'all' }}`
           files: |
-            output/*.img
-            extracted_partitions.zip
+            output/*
           token: ${{ secrets.GITHUB_TOKEN }}
