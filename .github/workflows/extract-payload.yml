@@ -33,7 +33,7 @@ jobs:
       - name: Install tools & PAC Extractor
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y unrar p7zip-full xz-utils aria2 gcc make
+          sudo apt-get install -y unrar p7zip-full xz-utils aria2 gcc make git
           
           # Download payload-dumper-go
           LATEST=$(curl -s https://api.github.com/repos/ssut/payload-dumper-go/releases/latest \
@@ -44,11 +44,14 @@ jobs:
           chmod +x payload-dumper-go
           sudo mv payload-dumper-go /usr/local/bin/
           
-          # Build PAC Extractor (C-based ringan)
-          wget -q https://raw.githubusercontent.com/R0rt1z2/pacextractor/main/pacextractor.c -O pacextractor.c
+          # Build PAC Extractor via Git Clone
+          git clone https://github.com/R0rt1z2/pacextractor.git
+          cd pacextractor
           gcc -O2 pacextractor.c -o pacextractor
           chmod +x pacextractor
           sudo mv pacextractor /usr/local/bin/
+          cd ..
+
 
       - name: Download firmware parts
         run: |
