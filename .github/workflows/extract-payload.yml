@@ -47,12 +47,31 @@ jobs:
           # Build PAC Extractor dari bismoy-bot
           git clone https://github.com/bismoy-bot/PAC-Extractor.git pacextractor_repo
           cd pacextractor_repo
-          gcc -O2 pacextractor.c -o pacextractor
-          chmod +x pacextractor
-          sudo mv pacextractor /usr/local/bin/
+          
+          echo "=== Isi folder dari PAC-Extractor ==="
+          ls -la
+          
+          # Deteksi otomatis file .c atau Makefile
+          if ls *.c 1> /dev/null 2>&1; then
+            echo "Ditemukan file C di folder utama, memulai compile..."
+            gcc -O2 *.c -o pacextractor
+            chmod +x pacextractor
+            sudo mv pacextractor /usr/local/bin/
+          elif [ -d "src" ] && ls src/*.c 1> /dev/null 2>&1; then
+            echo "Ditemukan file C di folder src/, memulai compile..."
+            gcc -O2 src/*.c -o pacextractor
+            chmod +x pacextractor
+            sudo mv pacextractor /usr/local/bin/
+          elif [ -f "Makefile" ] || [ -f "makefile" ]; then
+            echo "Ditemukan Makefile, menjalankan perintah make..."
+            make
+            BIN_FILE=$(find . -maxdepth 1 -type f -executable ! -name "*.sh" | head -1)
+            sudo mv "$BIN_FILE" /usr/local/bin/pacextractor
+          else
+            echo "ERROR: File .c atau Makefile tidak ditemukan!"
+            exit 1
+          fi
           cd ..
-
-
 
       - name: Download firmware parts
         run: |
