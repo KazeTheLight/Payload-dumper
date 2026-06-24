@@ -44,13 +44,14 @@ jobs:
           chmod +x payload-dumper-go
           sudo mv payload-dumper-go /usr/local/bin/
           
-          # Build PAC Extractor via Git Clone
-          git clone https://github.com/R0rt1z2/pacextractor.git
-          cd pacextractor
+          # Build PAC Extractor dari bismoy-bot
+          git clone https://github.com/bismoy-bot/PAC-Extractor.git pacextractor_repo
+          cd pacextractor_repo
           gcc -O2 pacextractor.c -o pacextractor
           chmod +x pacextractor
           sudo mv pacextractor /usr/local/bin/
           cd ..
+
 
 
       - name: Download firmware parts
