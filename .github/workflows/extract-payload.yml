@@ -476,4 +476,66 @@ jobs:
 
       - name: Dump payload.bin
         if: env.EXTRACT_MODE == 'payload'
-       
+        run: |
+          PARTITIONS="${{ github.event.inputs.partitions }}"
+
+          if [ -z "$PARTITIONS" ]; then
+            echo "Mengekstrak SEMUA partisi dari payload.bin..."
+            ./payload-dumper-go -o output/ extracted/payload.bin
+          else
+            PARTITIONS=$(echo "$PARTITIONS" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
+            echo "Mengekstrak partisi: $PARTITIONS"
+            ./payload-dumper-go -o output/ -partitions "$PARTITIONS" extracted/payload.bin
+          fi
+
+          echo ""
+          echo "=== Hasil ekstraksi ==="
+          ls -lh output/
+
+      - name: Compress output
+        run: |
+          # Cek ada file tidak
+          FILE_COUNT=$(ls output/ 2>/dev/null | wc -l)
+          if [ "$FILE_COUNT" -eq 0 ]; then
+            echo "ERROR: output/ kosong, tidak ada file untuk di-compress!"
+            ls -lah output/ || true
+            exit 1
+          fi
+          echo "=== File yang akan di-compress ==="
+          ls -lh output/
+          cd output
+          zip -r ../extracted_partitions.zip .
+          cd ..
+          ls -lh extracted_partitions.zip
+
+      - name: Job summary
+        run: |
+          echo "## Hasil Ekstraksi" >> $GITHUB_STEP_SUMMARY
+          echo "| File | Ukuran |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
+          ls -lh output/*.img 2>/dev/null | awk '{print "| "$9" | "$5" |"}' >> $GITHUB_STEP_SUMMARY || true
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Mode:** $EXTRACT_MODE" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: extracted-partitions
+          path: output/
+          retention-days: 7
+
+      - name: Upload to GitHub Release
+        if: ${{ github.event.inputs.release_tag != '' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.release_tag }}
+          name: "Extracted Partitions - ${{ github.event.inputs.release_tag }}"
+          body: |
+            ## Extracted from Firmware
+            **Source:** `${{ github.event.inputs.ota_url }}`
+            **Mode:** `${{ env.EXTRACT_MODE }}`
+            **Partitions:** `${{ github.event.inputs.partitions || 'all' }}`
+          files: |
+            output/*.img
+            extracted_partitions.zip
+          token: ${{ secrets.GITHUB_TOKEN }}
