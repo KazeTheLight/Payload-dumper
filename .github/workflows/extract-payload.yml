@@ -27,6 +27,22 @@ jobs:
       contents: write
 
     steps:
+      - name: Free up disk space
+        run: |
+          echo "=== Disk sebelum cleanup ==="
+          df -h /
+
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/.ghcup \
+            /usr/share/swift /opt/az /usr/local/share/powershell \
+            /usr/local/share/chromium /usr/local/lib/node_modules \
+            2>/dev/null || true
+          sudo docker image prune --all --force 2>/dev/null || true
+
+          echo ""
+          echo "=== Disk setelah cleanup ==="
+          df -h /
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -325,6 +341,12 @@ jobs:
           echo "=== File hasil merge ==="
           ls -lh "${MERGED_FILE}" 2>/dev/null || ls -lh
 
+          # Hapus folder downloads/ (sudah ter-copy ke root), hemat disk
+          rm -rf downloads/
+          echo ""
+          echo "=== Disk setelah hapus downloads/ ==="
+          df -h /
+
       - name: Detect format and extract
         run: |
           INFILE="$MERGED_FILE"
@@ -364,7 +386,8 @@ jobs:
 
           elif [[ "$FNAME" == *.pac ]]; then
             echo "FORMAT: pac (Spreadtrum/Unisoc firmware)"
-            python3 pacExtractor.py "$INFILE" archive_tmp/
+            python3 pacExtractor.py "$INFILE" archive_tmp/ > /tmp/pac_extract.log 2>&1 || { tail -50 /tmp/pac_extract.log; exit 1; }
+            tail -5 /tmp/pac_extract.log
 
           else
             echo "FORMAT tidak dikenal, mencoba deteksi otomatis..."
@@ -391,7 +414,9 @@ jobs:
             echo ""
             echo "Ditemukan file .pac di dalam archive: $PACFILE"
             echo "Mengekstrak .pac dengan pacExtractor..."
-            python3 pacExtractor.py "$PACFILE" archive_tmp/
+            python3 pacExtractor.py "$PACFILE" archive_tmp/ > /tmp/pac_extract.log 2>&1 || { tail -50 /tmp/pac_extract.log; exit 1; }
+            tail -5 /tmp/pac_extract.log
+            rm -f "$PACFILE"
             echo ""
             echo "=== Isi archive setelah ekstrak .pac ==="
             find archive_tmp/ -type f | sort
@@ -443,41 +468,12 @@ jobs:
             exit 1
           fi
 
+          # ── Bersihkan file yang sudah tidak diperlukan, hemat disk ──────────
+          rm -rf archive_tmp/ "$INFILE"
+          echo ""
+          echo "=== Disk setelah cleanup ==="
+          df -h /
+
       - name: Dump payload.bin
         if: env.EXTRACT_MODE == 'payload'
-        run: |
-          PARTITIONS="${{ github.event.inputs.partitions }}"
-
-          if [ -z "$PARTITIONS" ]; then
-            echo "Mengekstrak SEMUA partisi dari payload.bin..."
-            ./payload-dumper-go -o output/ extracted/payload.bin
-          else
-            PARTITIONS=$(echo "$PARTITIONS" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
-            echo "Mengekstrak partisi: $PARTITIONS"
-            ./payload-dumper-go -o output/ -partitions "$PARTITIONS" extracted/payload.bin
-          fi
-
-          echo ""
-          echo "=== Hasil ekstraksi ==="
-          ls -lh output/
-
-      - name: Compress output
-        run: |
-          # Cek ada file tidak
-          FILE_COUNT=$(ls output/ 2>/dev/null | wc -l)
-          if [ "$FILE_COUNT" -eq 0 ]; then
-            echo "ERROR: output/ kosong, tidak ada file untuk di-compress!"
-            ls -lah output/ || true
-            exit 1
-          fi
-          echo "=== File yang akan di-compress ==="
-          ls -lh output/
-          cd output
-          zip -r ../extracted_partitions.zip .
-          cd ..
-          ls -lh extracted_partitions.zip
-
-      - name: Job summary
-        run: |
-          echo "## Hasil Ekstraksi" >> $GITHUB_STEP_SUMMARY
-          echo "|
+       
