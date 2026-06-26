@@ -385,6 +385,18 @@ jobs:
           echo "=== Semua file dalam archive ==="
           find archive_tmp/ -type f | sort
 
+          # ── Cek apakah ada .pac di DALAM hasil ekstrak (mis. dibungkus zip) ──
+          PACFILE=$(find archive_tmp/ -type f -iname "*.pac" | head -1)
+          if [ -n "$PACFILE" ]; then
+            echo ""
+            echo "Ditemukan file .pac di dalam archive: $PACFILE"
+            echo "Mengekstrak .pac dengan pacExtractor..."
+            python3 pacExtractor.py "$PACFILE" archive_tmp/
+            echo ""
+            echo "=== Isi archive setelah ekstrak .pac ==="
+            find archive_tmp/ -type f | sort
+          fi
+
           if find archive_tmp/ -name "payload.bin" | grep -q .; then
             echo "MODE: OTA - payload.bin ditemukan"
             echo "EXTRACT_MODE=payload" >> $GITHUB_ENV
@@ -468,31 +480,4 @@ jobs:
       - name: Job summary
         run: |
           echo "## Hasil Ekstraksi" >> $GITHUB_STEP_SUMMARY
-          echo "| File | Ukuran |" >> $GITHUB_STEP_SUMMARY
-          echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
-          ls -lh output/*.img 2>/dev/null | awk '{print "| "$9" | "$5" |"}' >> $GITHUB_STEP_SUMMARY || true
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Mode:** $EXTRACT_MODE" >> $GITHUB_STEP_SUMMARY
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: extracted-partitions
-          path: output/
-          retention-days: 7
-
-      - name: Upload to GitHub Release
-        if: ${{ github.event.inputs.release_tag != '' }}
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.event.inputs.release_tag }}
-          name: "Extracted Partitions - ${{ github.event.inputs.release_tag }}"
-          body: |
-            ## Extracted from Firmware
-            **Source:** `${{ github.event.inputs.ota_url }}`
-            **Mode:** `${{ env.EXTRACT_MODE }}`
-            **Partitions:** `${{ github.event.inputs.partitions || 'all' }}`
-          files: |
-            output/*.img
-            extracted_partitions.zip
-          token: ${{ secrets.GITHUB_TOKEN }}
+          echo "|
