@@ -16,6 +16,8 @@
     input:focus { border-color: #818cf8 !important; box-shadow: 0 0 0 2px rgba(129,140,248,.15) !important; }
     .btn-primary:hover:not(:disabled) { background: linear-gradient(135deg,#4f46e5,#6366f1) !important; }
     .btn-primary:disabled { opacity: .4; cursor: not-allowed; }
+    .btn-secondary:hover:not(:disabled) { background: #1a2236 !important; }
+    .btn-secondary:disabled { opacity: .4; cursor: not-allowed; }
     .artifact-card:hover { background: #1e2535 !important; border-color: #34d399 !important; }
     ::-webkit-scrollbar { width: 5px; }
     ::-webkit-scrollbar-track { background: #0f1629; }
@@ -34,7 +36,7 @@
     const REPO_NAME      = "Payload-dumper";
     const PROXY_WORKFLOW = "proxy-trigger.yml";
     const MAIN_WORKFLOW  = "extract-payload.yml";
-    const READONLY_TOKEN = "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";
+    const TOKEN_KEY       = "firmware_dumper_gh_token"; // key di window.storage, bukan localStorage
     // ─────────────────────────────────────────────────────────────────────────
 
     const STATUS_COLORS = {
@@ -75,22 +77,71 @@
       const [conclusion, setConclusion] = useState(null);
       const [workflowUrl,setWorkflowUrl]= useState("");
       const [pollCount,  setPollCount]  = useState(0);
+
+      // ── Token state ──────────────────────────────────────────────────────
+      const [token,        setToken]        = useState("");      // token aktif yang dipakai untuk request
+      const [tokenInput,   setTokenInput]   = useState("");      // nilai di field input
+      const [tokenLoaded,  setTokenLoaded]  = useState(false);   // sudah selesai load dari storage?
+      const [tokenSaved,   setTokenSaved]   = useState(false);   // status "Tersimpan" sesaat
+      const [tokenError,   setTokenError]   = useState("");
+
       const logRef  = useRef(null);
       const pollRef = useRef(null);
 
       useEffect(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, [logs]);
       useEffect(() => () => clearInterval(pollRef.current), []);
 
+      // Load token tersimpan saat pertama kali dibuka
+      useEffect(() => {
+        (async () => {
+          try {
+            const result = await window.storage.get(TOKEN_KEY, false); // false = personal, tidak shared
+            if (result && result.value) {
+              setToken(result.value);
+              setTokenInput(result.value);
+            }
+          } catch (e) {
+            // belum ada token tersimpan — itu normal, biarkan kosong
+          } finally {
+            setTokenLoaded(true);
+          }
+        })();
+      }, []);
+
       const addLog = (text, type="info") =>
         setLogs(l => [...l, { text, type, id: Date.now()+Math.random() }]);
 
+      const saveToken = async () => {
+        const val = tokenInput.trim();
+        if (!val) { setTokenError("Token tidak boleh kosong."); return; }
+        try {
+          await window.storage.set(TOKEN_KEY, val, false);
+          setToken(val);
+          setTokenError("");
+          setTokenSaved(true);
+          setTimeout(() => setTokenSaved(false), 2000);
+        } catch (e) {
+          setTokenError("Gagal menyimpan token: " + e.message);
+        }
+      };
+
+      const clearToken = async () => {
+        try {
+          await window.storage.delete(TOKEN_KEY, false);
+        } catch (e) { /* key mungkin belum ada, aman diabaikan */ }
+        setToken("");
+        setTokenInput("");
+        setTokenError("");
+      };
+
       const rh = () => ({
-        "Authorization": `Bearer ${READONLY_TOKEN}`,
+        "Authorization": `Bearer ${token}`,
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
       });
 
       const trigger = async () => {
+        if (!token) { addLog("ERROR: Simpan token GitHub dulu sebelum menjalankan workflow!", "error"); return; }
         if (!otaUrl.trim()) { addLog("ERROR: URL firmware wajib diisi!", "error"); return; }
         setStatus("queued"); setArtifacts([]); setConclusion(null);
         setWorkflowUrl(""); setRunId(null); setMainRunId(null); setLogs([]);
@@ -110,6 +161,9 @@
           if (res.status === 204) {
             addLog("✅ Proxy workflow di-trigger! Menunggu run ID...", "success");
             setTimeout(() => findProxyRun(before), 5000);
+          } else if (res.status === 401) {
+            addLog("ERROR 401: Token tidak valid / sudah revoked. Cek lagi tokennya.", "error");
+            setStatus("failed");
           } else {
             const e = await res.json().catch(()=>({}));
             addLog(`ERROR ${res.status}: ${e.message||"Gagal trigger"}`, "error");
@@ -207,6 +261,7 @@
 
       const isRunning = status === "queued" || status === "in_progress";
       const displayRunId = mainRunId || runId;
+      const tokenDirty = tokenInput.trim() !== token;
 
       const input = (value, onChange, placeholder, type="text") => (
         <input type={type} placeholder={placeholder} value={value} onChange={e=>onChange(e.target.value)}
@@ -237,12 +292,39 @@
 
           <div style={{ maxWidth:"780px", margin:"0 auto", display:"flex", flexDirection:"column", gap:"16px" }}>
 
-            {/* Info token */}
-            <div style={{ background:"#0d1424", border:"1px solid #1e293b", borderRadius:"10px", padding:"10px 14px",
-              display:"flex", alignItems:"center", gap:"10px" }}>
-              <span style={{ fontSize:"15px" }}>🔒</span>
-              <div style={{ fontSize:"12px", color:"#64748b", lineHeight:"1.5" }}>
-                Tidak Perlu Input Token
+            {/* Token GitHub */}
+            <div style={{ background:"#0f1629", border:`1px solid ${token ? "#1e293b" : "#7c2d12"}`, borderRadius:"12px", padding:"16px" }}>
+              <span style={{ fontSize:"12px", fontWeight:"700", color:"#64748b",
+                textTransform:"uppercase", letterSpacing:"0.08em", display:"block", marginBottom:"10px" }}>
+                🔑 GitHub Token
+              </span>
+
+              <div style={{ display:"flex", gap:"8px" }}>
+                {input(tokenInput, setTokenInput, "github_pat_... (fine-grained, scope: Actions)", "password")}
+                <button className="btn-primary" onClick={saveToken}
+                  disabled={isRunning || !tokenInput.trim() || !tokenDirty}
+                  style={{ flexShrink:0, background:"linear-gradient(135deg,#6366f1,#818cf8)", border:"none",
+                    borderRadius:"8px", padding:"0 16px", color:"#fff", fontWeight:"600", fontSize:"13px", cursor:"pointer" }}>
+                  Simpan
+                </button>
+                {token && (
+                  <button className="btn-secondary" onClick={clearToken} disabled={isRunning}
+                    style={{ flexShrink:0, background:"#0a0e1a", border:"1px solid #1e293b",
+                      borderRadius:"8px", padding:"0 14px", color:"#94a3b8", fontWeight:"600", fontSize:"13px", cursor:"pointer" }}>
+                    Hapus
+                  </button>
+                )}
+              </div>
+
+              <div style={{ marginTop:"8px", fontSize:"11px", color:"#475569", lineHeight:"1.5" }}>
+                {!tokenLoaded ? "Memuat token tersimpan..." :
+                 tokenSaved ? <span style={{ color:"#34d399" }}>✅ Token tersimpan di penyimpanan pribadi artifact ini.</span> :
+                 tokenError ? <span style={{ color:"#f87171" }}>{tokenError}</span> :
+                 token ? "Token tersimpan dan siap dipakai. Tidak terlihat di kode/sumber file." :
+                 "Belum ada token tersimpan — masukkan Personal Access Token (scope: Actions read/write) lalu klik Simpan."}
+              </div>
+              <div style={{ marginTop:"4px", fontSize:"11px", color:"#334155", lineHeight:"1.5" }}>
+                Disimpan lewat penyimpanan bawaan artifact (bukan localStorage — itu diblokir di Claude). Hanya kamu yang bisa akses, tapi tetap perlakukan seperti password: jangan share link/screenshot artifact ini saat token sudah terisi.
               </div>
             </div>
 
@@ -283,135 +365,17 @@
                 </div>
               </div>
 
-              <button className="btn-primary" onClick={trigger} disabled={isRunning || !otaUrl.trim()}
+              <button className="btn-primary" onClick={trigger} disabled={isRunning || !otaUrl.trim() || !token}
                 style={{ marginTop:"14px", width:"100%",
                   background:"linear-gradient(135deg,#6366f1,#818cf8)",
                   border:"none", borderRadius:"9px", padding:"12px",
                   color:"#fff", fontWeight:"700", fontSize:"14px",
                   cursor:"pointer", display:"flex", alignItems:"center",
                   justifyContent:"center", gap:"8px", transition:"background .2s" }}>
-                {isRunning ? <><Spinner /> Menjalankan Workflow...</> : "▶ Jalankan Dump Firmware"}
+                {isRunning ? <><Spinner /> Menjalankan Workflow...</> : !token ? "🔒 Simpan token dulu" : "▶ Jalankan Dump Firmware"}
               </button>
             </div>
 
             {/* Status */}
             {status !== "idle" && (
-              <div style={{ background:"#0f1629", border:`1px solid ${STATUS_COLORS[status]}44`,
-                borderRadius:"12px", padding:"12px 16px",
-                display:"flex", alignItems:"center", justifyContent:"space-between" }}>
-                <div style={{ display:"flex", alignItems:"center", gap:"10px" }}>
-                  {isRunning && <Spinner />}
-                  <div style={{ width:"8px", height:"8px", borderRadius:"50%",
-                    background: STATUS_COLORS[status],
-                    animation: isRunning ? "pulse 1.5s infinite" : "none" }} />
-                  <span style={{ fontSize:"13px", fontWeight:"600", color: STATUS_COLORS[status] }}>
-                    {STATUS_LABELS[status] || status}
-                  </span>
-                  {runId && !mainRunId && <span style={{ fontSize:"11px", color:"#475569", fontFamily:"monospace" }}>Proxy #{runId}</span>}
-                  {mainRunId && <span style={{ fontSize:"11px", color:"#475569", fontFamily:"monospace" }}>Main Run #{mainRunId}</span>}
-                </div>
-                {workflowUrl && (
-                  <a href={workflowUrl} target="_blank" rel="noreferrer"
-                    style={{ fontSize:"12px", color:"#818cf8", textDecoration:"none",
-                      background:"#1a1f35", padding:"3px 10px", borderRadius:"6px" }}>
-                    Lihat di GitHub →
-                  </a>
-                )}
-              </div>
-            )}
-
-            {/* Log */}
-            {logs.length > 0 && (
-              <div style={{ background:"#060a14", border:"1px solid #1e293b", borderRadius:"12px", overflow:"hidden" }}>
-                <div style={{ padding:"8px 14px", background:"#0a0e1a", borderBottom:"1px solid #1e293b",
-                  display:"flex", alignItems:"center", gap:"8px" }}>
-                  <div style={{ display:"flex", gap:"5px" }}>
-                    {["#ef4444","#f59e0b","#10b981"].map((c,i)=>(
-                      <div key={i} style={{ width:"10px", height:"10px", borderRadius:"50%", background:c }} />
-                    ))}
-                  </div>
-                  <span style={{ fontSize:"11px", color:"#475569", fontFamily:"monospace", marginLeft:"4px" }}>
-                    firmware-dumper — log
-                  </span>
-                  {pollCount > 0 && <span style={{ marginLeft:"auto", fontSize:"10px", color:"#334155" }}>poll #{pollCount}</span>}
-                </div>
-                <div ref={logRef} style={{ padding:"12px 14px", maxHeight:"220px", overflowY:"auto",
-                  display:"flex", flexDirection:"column", gap:"2px" }}>
-                  {logs.map(l => <TerminalLine key={l.id} text={l.text} type={l.type} />)}
-                  {isRunning && (
-                    <div style={{ color:"#334155", fontSize:"12px", fontFamily:"monospace", marginTop:"4px" }}>
-                      <Spinner /> polling setiap 8–10 detik...
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
-
-            {/* Artifacts */}
-            {artifacts.length > 0 && (
-              <div style={{ background:"#0f1629", border:"1px solid #1e293b", borderRadius:"12px", padding:"16px" }}>
-                <span style={{ fontSize:"12px", fontWeight:"700", color:"#34d399",
-                  textTransform:"uppercase", letterSpacing:"0.08em", display:"block", marginBottom:"12px" }}>
-                  ✅ Artifact Hasil Dump ({artifacts.length})
-                </span>
-                <div style={{ display:"flex", flexDirection:"column", gap:"8px" }}>
-                  {artifacts.map(a => (
-                    <a key={a.id} className="artifact-card"
-                      href={`https://github.com/${REPO_OWNER}/${REPO_NAME}/actions/runs/${displayRunId}/artifacts/${a.id}`}
-                      target="_blank" rel="noreferrer"
-                      style={{ display:"flex", alignItems:"center", justifyContent:"space-between",
-                        padding:"10px 14px", background:"#0a0e1a", border:"1px solid #1e293b",
-                        borderRadius:"9px", textDecoration:"none", color:"#e2e8f0",
-                        transition:"background .15s, border-color .15s" }}>
-                      <div style={{ display:"flex", alignItems:"center", gap:"10px" }}>
-                        <span style={{ fontSize:"18px" }}>📦</span>
-                        <div>
-                          <div style={{ fontSize:"13px", fontWeight:"600", fontFamily:"monospace" }}>{a.name}</div>
-                          <div style={{ fontSize:"11px", color:"#475569", marginTop:"2px" }}>
-                            {(a.size_in_bytes/1024/1024).toFixed(1)} MB
-                            {a.expires_at && ` · Kedaluwarsa: ${new Date(a.expires_at).toLocaleDateString("id-ID")}`}
-                          </div>
-                        </div>
-                      </div>
-                      <span style={{ fontSize:"11px", color:"#34d399", background:"#052e16", padding:"3px 8px", borderRadius:"6px" }}>
-                        Download →
-                      </span>
-                    </a>
-                  ))}
-                </div>
-                <p style={{ margin:"10px 0 0", fontSize:"11px", color:"#334155" }}>
-                  * Artifact tersedia 90 hari. Login GitHub diperlukan untuk download.
-                </p>
-              </div>
-            )}
-
-            {/* Error */}
-            {conclusion === "failure" && (
-              <div style={{ background:"#1a0a0a", border:"1px solid #3f1515", borderRadius:"12px",
-                padding:"14px 16px", display:"flex", gap:"10px", alignItems:"flex-start" }}>
-                <span style={{ fontSize:"18px" }}>❌</span>
-                <div>
-                  <div style={{ fontSize:"13px", fontWeight:"600", color:"#f87171", marginBottom:"4px" }}>Workflow Gagal</div>
-                  <div style={{ fontSize:"12px", color:"#6b7280" }}>Cek log lengkap di GitHub Actions untuk detail error.</div>
-                  {workflowUrl && (
-                    <a href={workflowUrl} target="_blank" rel="noreferrer"
-                      style={{ fontSize:"12px", color:"#818cf8", display:"block", marginTop:"6px" }}>
-                      Lihat log di GitHub →
-                    </a>
-                  )}
-                </div>
-              </div>
-            )}
-
-            <div style={{ textAlign:"center", padding:"8px", fontSize:"11px", color:"#1e293b" }}>
-              Firmware Dumper · {REPO_OWNER}/{REPO_NAME} · GitHub Actions
-            </div>
-          </div>
-        </div>
-      );
-    }
-
-    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
-  </script>
-</body>
-</html>
+              <div style={{ background:"#0f1629", border:`1px solid
