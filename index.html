@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Firmware Dumper</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0a0e1a; color: #e2e8f0; font-family: 'Inter', system-ui, sans-serif; }
+    input { outline: none; transition: border-color .15s, box-shadow .15s; }
+    input:focus { border-color: #818cf8 !important; box-shadow: 0 0 0 2px rgba(129,140,248,.15) !important; }
+    .btn-primary:hover:not(:disabled) { background: linear-gradient(135deg,#4f46e5,#6366f1) !important; }
+    .btn-primary:disabled { opacity: .4; cursor: not-allowed; }
+    .artifact-card:hover { background: #1e2535 !important; border-color: #34d399 !important; }
+    ::-webkit-scrollbar { width: 5px; }
+    ::-webkit-scrollbar-track { background: #0f1629; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    // ─── KONFIGURASI — sesuaikan di sini ─────────────────────────────────────
+    const REPO_OWNER     = "KazeTheLight";
+    const REPO_NAME      = "Payload-dumper";
+    const PROXY_WORKFLOW = "proxy-trigger.yml";
+    const MAIN_WORKFLOW  = "extract-payload.yml";
+    const READONLY_TOKEN = "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";
+    // ─────────────────────────────────────────────────────────────────────────
+
+    const STATUS_COLORS = {
+      queued: "#f59e0b", in_progress: "#3b82f6",
+      completed: "#10b981", failed: "#ef4444", idle: "#6b7280",
+    };
+    const STATUS_LABELS = {
+      queued: "Antri...", in_progress: "Berjalan",
+      completed: "Selesai", failed: "Gagal", idle: "Idle",
+    };
+
+    function TerminalLine({ text, type = "info" }) {
+      const colors = { info:"#94a3b8", success:"#34d399", error:"#f87171", warn:"#fbbf24", cmd:"#818cf8" };
+      return (
+        <div style={{ color: colors[type]||colors.info, fontFamily:"'JetBrains Mono',monospace", fontSize:"12px", lineHeight:"1.6", wordBreak:"break-all" }}>
+          <span style={{ color:"#475569", marginRight:"8px", userSelect:"none" }}>›</span>{text}
+        </div>
+      );
+    }
+
+    function Spinner() {
+      const [f, setF] = useState(0);
+      const fr = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"];
+      useEffect(() => { const t = setInterval(() => setF(x=>(x+1)%fr.length), 80); return ()=>clearInterval(t); }, []);
+      return <span style={{ color:"#818cf8" }}>{fr[f]}</span>;
+    }
+
+    function App() {
+      const [otaUrl,     setOtaUrl]     = useState("");
+      const [extraUrls,  setExtraUrls]  = useState("");
+      const [partitions, setPartitions] = useState("");
+      const [releaseTag, setReleaseTag] = useState("");
+      const [status,     setStatus]     = useState("idle");
+      const [runId,      setRunId]      = useState(null);
+      const [mainRunId,  setMainRunId]  = useState(null);
+      const [logs,       setLogs]       = useState([]);
+      const [artifacts,  setArtifacts]  = useState([]);
+      const [conclusion, setConclusion] = useState(null);
+      const [workflowUrl,setWorkflowUrl]= useState("");
+      const [pollCount,  setPollCount]  = useState(0);
+      const logRef  = useRef(null);
+      const pollRef = useRef(null);
+
+      useEffect(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, [logs]);
+      useEffect(() => () => clearInterval(pollRef.current), []);
+
+      const addLog = (text, type="info") =>
+        setLogs(l => [...l, { text, type, id: Date.now()+Math.random() }]);
+
+      const rh = () => ({
+        "Authorization": `Bearer ${READONLY_TOKEN}`,
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+      });
+
+      const trigger = async () => {
+        if (!otaUrl.trim()) { addLog("ERROR: URL firmware wajib diisi!", "error"); return; }
+        setStatus("queued"); setArtifacts([]); setConclusion(null);
+        setWorkflowUrl(""); setRunId(null); setMainRunId(null); setLogs([]);
+        addLog(`Memulai proxy trigger untuk: ${otaUrl}`, "cmd");
+
+        const inputs = { ota_url: otaUrl.trim() };
+        if (extraUrls.trim())  inputs.extra_urls  = extraUrls.trim();
+        if (partitions.trim()) inputs.partitions  = partitions.trim();
+        if (releaseTag.trim()) inputs.release_tag = releaseTag.trim();
+
+        try {
+          const before = new Date().toISOString();
+          const res = await fetch(
+            `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/actions/workflows/${PROXY_WORKFLOW}/dispatches`,
+            { method:"POST", headers:{...rh(),"Content-Type":"application/json"}, body: JSON.stringify({ ref:"main", inputs }) }
+          );
+          if (res.status === 204) {
+            addLog("✅ Proxy workflow di-trigger! Menunggu run ID...", "success");
+            setTimeout(() => findProxyRun(before), 5000);
+          } else {
+            const e = await res.json().catch(()=>({}));
+            addLog(`ERROR ${res.status}: ${e.message||"Gagal trigger"}`, "error");
+            setStatus("failed");
+          }
+        } catch(e) { addLog(`ERROR: ${e.message}`, "error"); setStatus("failed"); }
+      };
+
+      const findProxyRun = async (after, attempt=0) => {
+        try {
+          const res  = await fetch(`https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/actions/runs?event=workflow_dispatch&per_page=10`, { headers: rh() });
+          const data = await res.json();
+          const run  = data.workflow_runs?.find(r => r.path?.includes(PROXY_WORKFLOW) && new Date(r.created_at) >= new Date(after));
+          if (run) {
+            setRunId(run.id); setWorkflowUrl(run.html_url);
+            addLog(`Proxy Run #${run.id} ditemukan...`, "info");
+            pollProxy(run.id, after);
+          } else if (attempt < 12) {
+            addLog(`Menunggu proxy run... (${attempt+1}/12)`, "info");
+            setTimeout(() => findProxyRun(after, attempt+1), 4000);
+          } else { addLog("ERROR: Proxy run tidak ditemukan.", "error"); setStatus("failed"); }
+        } catch(e) { addLog(`ERROR: ${e.message}`, "error"); }
+      };
+
+      const pollProxy = (id, after) => {
+        clearInterval(pollRef.current);
+        pollRef.current = setInterval(async () => {
+          try {
+            const run = await fetch(`https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/actions/runs/${id}`, { headers: rh() }).then(r=>r.json());
+            if (run.status === "completed") {
+              clearInterval(pollRef.current);
+              if (run.conclusion === "success") {
+                addLog("✅ Proxy selesai! Mencari workflow utama...", "success");
+                setTimeout(() => findMainRun(after), 6000);
+              } else {
+                addLog(`❌ Proxy gagal: ${run.conclusion}`, "error");
+                setStatus("failed"); setConclusion("failure");
+              }
+            } else {
+              addLog(`Proxy status: ${run.status}`, "info");
+            }
+          } catch(e) { addLog(`ERROR poll proxy: ${e.message}`, "error"); }
+        }, 8000);
+      };
+
+      const findMainRun = async (after, attempt=0) => {
+        try {
+          const res  = await fetch(`https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/actions/runs?event=workflow_dispatch&per_page=10`, { headers: rh() });
+          const data = await res.json();
+          const run  = data.workflow_runs?.find(r => r.path?.includes(MAIN_WORKFLOW) && new Date(r.created_at) >= new Date(after));
+          if (run) {
+            setMainRunId(run.id); setWorkflowUrl(run.html_url);
+            addLog(`Main Run #${run.id} ditemukan — polling...`, "info");
+            setStatus("in_progress");
+            pollMain(run.id);
+          } else if (attempt < 12) {
+            addLog(`Menunggu main run... (${attempt+1}/12)`, "info");
+            setTimeout(() => findMainRun(after, attempt+1), 5000);
+          } else { addLog("ERROR: Main run tidak ditemukan.", "error"); setStatus("failed"); }
+        } catch(e) { addLog(`ERROR: ${e.message}`, "error"); }
+      };
+
+      const pollMain = (id) => {
+        clearInterval(pollRef.current);
+        pollRef.current = setInterval(async () => {
+          try {
+            const run = await fetch(`https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/actions/runs/${id}`, { headers: rh() }).then(r=>r.json());
+            setStatus(run.conclusion === "failure" ? "failed" : run.status);
+            setPollCount(p => p+1);
+            if (run.status === "completed") {
+              clearInterval(pollRef.current);
+              setConclusion(run.conclusion);
+              addLog(`Workflow selesai: ${run.conclusion?.toUpperCase()}`, run.conclusion==="success"?"success":"error");
+              if (run.conclusion === "success") fetchArtifacts(id);
+              else addLog("Cek log di GitHub Actions.", "error");
+            } else {
+              addLog(`Status: ${run.status}`, "info");
+            }
+          } catch(e) { addLog(`ERROR poll: ${e.message}`, "error"); }
+        }, 10000);
+      };
+
+      const fetchArtifacts = async (id) => {
+        addLog("Mengambil artifact...", "cmd");
+        try {
+          const data = await fetch(`https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/actions/runs/${id}/artifacts`, { headers: rh() }).then(r=>r.json());
+          const arts = data.artifacts || [];
+          setArtifacts(arts);
+          if (arts.length > 0) {
+            addLog(`✅ ${arts.length} artifact ditemukan!`, "success");
+            arts.forEach(a => addLog(`📦 ${a.name} — ${(a.size_in_bytes/1024/1024).toFixed(1)} MB`, "success"));
+          } else addLog("Tidak ada artifact.", "warn");
+        } catch(e) { addLog(`ERROR artifact: ${e.message}`, "error"); }
+      };
+
+      const isRunning = status === "queued" || status === "in_progress";
+      const displayRunId = mainRunId || runId;
+
+      const input = (value, onChange, placeholder, type="text") => (
+        <input type={type} placeholder={placeholder} value={value} onChange={e=>onChange(e.target.value)}
+          disabled={isRunning}
+          style={{ width:"100%", background:"#0a0e1a", border:"1px solid #1e293b", borderRadius:"8px",
+            padding:"9px 12px", color:"#e2e8f0", fontSize:"13px" }} />
+      );
+
+      return (
+        <div style={{ minHeight:"100vh", background:"#0a0e1a", color:"#e2e8f0", padding:"24px 16px" }}>
+
+          {/* Header */}
+          <div style={{ maxWidth:"780px", margin:"0 auto 28px" }}>
+            <div style={{ display:"flex", alignItems:"center", gap:"12px", marginBottom:"6px" }}>
+              <div style={{ width:"38px", height:"38px", borderRadius:"10px",
+                background:"linear-gradient(135deg,#818cf8,#6366f1)",
+                display:"flex", alignItems:"center", justifyContent:"center", fontSize:"20px" }}>⚙</div>
+              <h1 style={{ margin:0, fontSize:"22px", fontWeight:"700", letterSpacing:"-0.5px" }}>Firmware Dumper</h1>
+              <span style={{ marginLeft:"auto", fontSize:"11px", padding:"2px 8px",
+                background:"#1e293b", borderRadius:"20px", color:"#64748b", fontFamily:"monospace" }}>
+                {REPO_OWNER}/{REPO_NAME}
+              </span>
+            </div>
+            <p style={{ margin:0, color:"#475569", fontSize:"13px" }}>
+              Trigger GitHub Actions via proxy → Dump firmware → Download artifact
+            </p>
+          </div>
+
+          <div style={{ maxWidth:"780px", margin:"0 auto", display:"flex", flexDirection:"column", gap:"16px" }}>
+
+            {/* Info token */}
+            <div style={{ background:"#0d1424", border:"1px solid #1e293b", borderRadius:"10px", padding:"10px 14px",
+              display:"flex", alignItems:"center", gap:"10px" }}>
+              <span style={{ fontSize:"15px" }}>🔒</span>
+              <div style={{ fontSize:"12px", color:"#64748b", lineHeight:"1.5" }}>
+                Tidak Perlu Input Token
+              </div>
+            </div>
+
+            {/* Form */}
+            <div style={{ background:"#0f1629", border:"1px solid #1e293b", borderRadius:"12px", padding:"18px" }}>
+              <span style={{ fontSize:"12px", fontWeight:"700", color:"#64748b",
+                textTransform:"uppercase", letterSpacing:"0.08em", display:"block", marginBottom:"14px" }}>
+                📦 Input Firmware
+              </span>
+
+              <div style={{ display:"flex", flexDirection:"column", gap:"10px" }}>
+                <div>
+                  <label style={{ display:"block", fontSize:"12px", color:"#64748b", marginBottom:"5px" }}>
+                    URL Firmware <span style={{ color:"#f87171" }}>*</span>
+                    <span style={{ marginLeft:"6px", color:"#334155" }}>— Gofile, Pixeldrain, MediaFire, GDrive, direct link</span>
+                  </label>
+                  {input(otaUrl, setOtaUrl, "https://pixeldrain.com/u/xxxxxxxx", "url")}
+                </div>
+                <div>
+                  <label style={{ display:"block", fontSize:"12px", color:"#64748b", marginBottom:"5px" }}>
+                    URL Tambahan (split parts) <span style={{ color:"#334155" }}>— pisah koma, opsional</span>
+                  </label>
+                  {input(extraUrls, setExtraUrls, "https://..., https://...")}
+                </div>
+                <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:"10px" }}>
+                  <div>
+                    <label style={{ display:"block", fontSize:"12px", color:"#64748b", marginBottom:"5px" }}>
+                      Partisi <span style={{ color:"#334155" }}>— kosong = semua</span>
+                    </label>
+                    {input(partitions, setPartitions, "boot,vendor_boot,init_boot")}
+                  </div>
+                  <div>
+                    <label style={{ display:"block", fontSize:"12px", color:"#64748b", marginBottom:"5px" }}>
+                      Release Tag <span style={{ color:"#334155" }}>— opsional</span>
+                    </label>
+                    {input(releaseTag, setReleaseTag, "v1.0.0")}
+                  </div>
+                </div>
+              </div>
+
+              <button className="btn-primary" onClick={trigger} disabled={isRunning || !otaUrl.trim()}
+                style={{ marginTop:"14px", width:"100%",
+                  background:"linear-gradient(135deg,#6366f1,#818cf8)",
+                  border:"none", borderRadius:"9px", padding:"12px",
+                  color:"#fff", fontWeight:"700", fontSize:"14px",
+                  cursor:"pointer", display:"flex", alignItems:"center",
+                  justifyContent:"center", gap:"8px", transition:"background .2s" }}>
+                {isRunning ? <><Spinner /> Menjalankan Workflow...</> : "▶ Jalankan Dump Firmware"}
+              </button>
+            </div>
+
+            {/* Status */}
+            {status !== "idle" && (
+              <div style={{ background:"#0f1629", border:`1px solid ${STATUS_COLORS[status]}44`,
+                borderRadius:"12px", padding:"12px 16px",
+                display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+                <div style={{ display:"flex", alignItems:"center", gap:"10px" }}>
+                  {isRunning && <Spinner />}
+                  <div style={{ width:"8px", height:"8px", borderRadius:"50%",
+                    background: STATUS_COLORS[status],
+                    animation: isRunning ? "pulse 1.5s infinite" : "none" }} />
+                  <span style={{ fontSize:"13px", fontWeight:"600", color: STATUS_COLORS[status] }}>
+                    {STATUS_LABELS[status] || status}
+                  </span>
+                  {runId && !mainRunId && <span style={{ fontSize:"11px", color:"#475569", fontFamily:"monospace" }}>Proxy #{runId}</span>}
+                  {mainRunId && <span style={{ fontSize:"11px", color:"#475569", fontFamily:"monospace" }}>Main Run #{mainRunId}</span>}
+                </div>
+                {workflowUrl && (
+                  <a href={workflowUrl} target="_blank" rel="noreferrer"
+                    style={{ fontSize:"12px", color:"#818cf8", textDecoration:"none",
+                      background:"#1a1f35", padding:"3px 10px", borderRadius:"6px" }}>
+                    Lihat di GitHub →
+                  </a>
+                )}
+              </div>
+            )}
+
+            {/* Log */}
+            {logs.length > 0 && (
+              <div style={{ background:"#060a14", border:"1px solid #1e293b", borderRadius:"12px", overflow:"hidden" }}>
+                <div style={{ padding:"8px 14px", background:"#0a0e1a", borderBottom:"1px solid #1e293b",
+                  display:"flex", alignItems:"center", gap:"8px" }}>
+                  <div style={{ display:"flex", gap:"5px" }}>
+                    {["#ef4444","#f59e0b","#10b981"].map((c,i)=>(
+                      <div key={i} style={{ width:"10px", height:"10px", borderRadius:"50%", background:c }} />
+                    ))}
+                  </div>
+                  <span style={{ fontSize:"11px", color:"#475569", fontFamily:"monospace", marginLeft:"4px" }}>
+                    firmware-dumper — log
+                  </span>
+                  {pollCount > 0 && <span style={{ marginLeft:"auto", fontSize:"10px", color:"#334155" }}>poll #{pollCount}</span>}
+                </div>
+                <div ref={logRef} style={{ padding:"12px 14px", maxHeight:"220px", overflowY:"auto",
+                  display:"flex", flexDirection:"column", gap:"2px" }}>
+                  {logs.map(l => <TerminalLine key={l.id} text={l.text} type={l.type} />)}
+                  {isRunning && (
+                    <div style={{ color:"#334155", fontSize:"12px", fontFamily:"monospace", marginTop:"4px" }}>
+                      <Spinner /> polling setiap 8–10 detik...
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Artifacts */}
+            {artifacts.length > 0 && (
+              <div style={{ background:"#0f1629", border:"1px solid #1e293b", borderRadius:"12px", padding:"16px" }}>
+                <span style={{ fontSize:"12px", fontWeight:"700", color:"#34d399",
+                  textTransform:"uppercase", letterSpacing:"0.08em", display:"block", marginBottom:"12px" }}>
+                  ✅ Artifact Hasil Dump ({artifacts.length})
+                </span>
+                <div style={{ display:"flex", flexDirection:"column", gap:"8px" }}>
+                  {artifacts.map(a => (
+                    <a key={a.id} className="artifact-card"
+                      href={`https://github.com/${REPO_OWNER}/${REPO_NAME}/actions/runs/${displayRunId}/artifacts/${a.id}`}
+                      target="_blank" rel="noreferrer"
+                      style={{ display:"flex", alignItems:"center", justifyContent:"space-between",
+                        padding:"10px 14px", background:"#0a0e1a", border:"1px solid #1e293b",
+                        borderRadius:"9px", textDecoration:"none", color:"#e2e8f0",
+                        transition:"background .15s, border-color .15s" }}>
+                      <div style={{ display:"flex", alignItems:"center", gap:"10px" }}>
+                        <span style={{ fontSize:"18px" }}>📦</span>
+                        <div>
+                          <div style={{ fontSize:"13px", fontWeight:"600", fontFamily:"monospace" }}>{a.name}</div>
+                          <div style={{ fontSize:"11px", color:"#475569", marginTop:"2px" }}>
+                            {(a.size_in_bytes/1024/1024).toFixed(1)} MB
+                            {a.expires_at && ` · Kedaluwarsa: ${new Date(a.expires_at).toLocaleDateString("id-ID")}`}
+                          </div>
+                        </div>
+                      </div>
+                      <span style={{ fontSize:"11px", color:"#34d399", background:"#052e16", padding:"3px 8px", borderRadius:"6px" }}>
+                        Download →
+                      </span>
+                    </a>
+                  ))}
+                </div>
+                <p style={{ margin:"10px 0 0", fontSize:"11px", color:"#334155" }}>
+                  * Artifact tersedia 90 hari. Login GitHub diperlukan untuk download.
+                </p>
+              </div>
+            )}
+
+            {/* Error */}
+            {conclusion === "failure" && (
+              <div style={{ background:"#1a0a0a", border:"1px solid #3f1515", borderRadius:"12px",
+                padding:"14px 16px", display:"flex", gap:"10px", alignItems:"flex-start" }}>
+                <span style={{ fontSize:"18px" }}>❌</span>
+                <div>
+                  <div style={{ fontSize:"13px", fontWeight:"600", color:"#f87171", marginBottom:"4px" }}>Workflow Gagal</div>
+                  <div style={{ fontSize:"12px", color:"#6b7280" }}>Cek log lengkap di GitHub Actions untuk detail error.</div>
+                  {workflowUrl && (
+                    <a href={workflowUrl} target="_blank" rel="noreferrer"
+                      style={{ fontSize:"12px", color:"#818cf8", display:"block", marginTop:"6px" }}>
+                      Lihat log di GitHub →
+                    </a>
+                  )}
+                </div>
+              </div>
+            )}
+
+            <div style={{ textAlign:"center", padding:"8px", fontSize:"11px", color:"#1e293b" }}>
+              Firmware Dumper · {REPO_OWNER}/{REPO_NAME} · GitHub Actions
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
